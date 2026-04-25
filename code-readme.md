@@ -128,7 +128,7 @@ WebUI 采用 Streamlit 多页面架构，入口为 `streamlit_app.py`。
 **使用流程：**
 
 1. **登录页**：输入用户名，系统自动加载向量库、构建检索器、创建 Agent，并生成唯一会话 ID。
-2. **聊天页**：主对话界面，支持流式回复。侧边栏可快速切换：
+2. **聊天页**：主对话界面，支持流式回复。当任务较复杂时，侧边栏会自动显示 **📋 执行计划** 卡片，实时展示计划步骤、执行进度和状态（已完成标绿、执行中蓝色闪烁、失败标红）。侧边栏可快速切换：
    - 新对话：创建全新会话
    - 知识库：进入知识库管理页
    - 长期记忆：查看和编辑用户记忆
@@ -168,6 +168,35 @@ WebUI 采用 Streamlit 多页面架构，入口为 `streamlit_app.py`。
 助手：（调用 web_search）
     根据搜索结果（来源: weather.example.com），
     上海今天多云，气温 22-28°C...
+```
+
+**示例 4：复杂任务 Plan-Act 分解（WebUI 侧边栏显示执行计划）**
+
+```
+用户：先搜索知识库中关于 LangChain 的内容，然后保存我的专业领域为 AI
+
+[侧边栏显示 📋 执行计划]
+⏳ 步骤 1: retrieve_documents （执行中...）
+⚪ 步骤 2: save_user_info
+
+助手：（执行步骤 1）
+    [1] 来源: ./documents/PSR详细理论证明.md
+    ...
+
+[侧边栏更新]
+✅ 步骤 1: retrieve_documents
+⏳ 步骤 2: save_user_info （执行中...）
+
+助手：（执行步骤 2）
+    已保存信息: 专业领域 = AI
+
+[侧边栏更新]
+✅ 步骤 1: retrieve_documents
+✅ 步骤 2: save_user_info
+
+助手：根据您的请求，我已成功执行了以下操作：
+    1. 搜索知识库...
+    2. 保存您的专业领域为 AI...
 ```
 
 ---
@@ -364,9 +393,9 @@ user_id ──▶ ./data/user_info/{user_id}.json
 
 ---
 
-### 4.6 `agent.py` —— LangGraph ReAct Agent 创建与配置
+### 4.6 `agent.py` —— Plan-Act 智能体调度层
 
-**业务职责**：将所有组件（LLM、工具、系统提示词、记忆持久化）装配成一个可运行的 ReAct Agent。
+**业务职责**：将所有组件（LLM、工具、系统提示词、记忆持久化）装配成一个**Plan-Act 模式**的智能体。原 ReAct Agent 作为子图嵌入，复杂任务自动分解执行，简单任务直接走原 ReAct 流程。
 
 **核心业务逻辑**：
 
@@ -374,33 +403,45 @@ user_id ──▶ ./data/user_info/{user_id}.json
 系统提示词（角色定义 + 行为准则 + 联网规则）
     │
     ▼
-langchain.agents.create_agent(
-    llm_model="deepseek-chat",
-    tools=tools,
-    system_prompt=system_prompt,
-    checkpointer=SqliteSaver(./data/checkpoints.db)
-)
+_build_react_agent(tools, system_prompt, checkpointer) ──▶ 原 ReAct 子图
     │
     ▼
-CompiledStateGraph（配置 recursion_limit）
+StateGraph(AgentState) ──▶ Plan-Act 外层状态图
+    │
+    ├──▶ classify_complexity ──▶ LLM 判断复杂度
+    │       ├──▶ 简单 ──▶ react_agent（原 ReAct 子图）──▶ END
+    │       └──▶ 复杂 ──▶ generate_plan ──▶ execute_step
+    │                                   │
+    │                                   ▼
+    │                              check_progress
+    │                                   │
+    │                    need_replan ──▶ generate_plan（重规划，最多 3 次）
+    │                    未完成    ──▶ execute_step
+    │                    全部完成  ──▶ summarize_results ──▶ END
+    │
+    ▼
+CompiledStateGraph（配置 recursion_limit + SqliteSaver）
 ```
 
 **关键设计决策**：
 
-- **LangGraph ReAct Agent**：使用 `create_agent`（LangChain 1.2.15 中 LangGraph 的 ReAct 封装）而非旧版 `AgentExecutor`。ReAct 循环让 LLM 自主决定"是否需要调用工具→调用什么工具→观察结果→继续思考或回复用户"，比固定流程更灵活。
-- **系统提示词内置决策优先级**：
-  1. 询问个人信息 → 先查 `get_user_info`
-  2. 询问知识点/参考资料 → 先调用 `retrieve_documents`
-  3. 涉及实时动态 → 调用 `web_search`
-  4. 绝不编造，知识库无结果时诚实告知
-- **SqliteSaver 持久化会话状态**：通过 SQLite 数据库存储 LangGraph 的 checkpoint，实现跨进程、跨重启的会话恢复。`thread_id` 对应 session_id，保证会话隔离。
-- **`recursion_limit` 防护**：将 `max_iterations` 映射为 LangGraph 的 `recursion_limit`（×10 留有余量），防止 Agent 在极端情况下无限循环。
+- **Plan-Act 双层架构**：外层 StateGraph 负责"判断复杂度 → 生成计划 → 执行步骤 → 检查进度 → 汇总结果"的固定流程；内层 `react_agent` 子图保留原 ReAct 循环能力，处理简单查询和单步工具调用。两层共享同一个 `SqliteSaver`，状态自动持久化到 `./data/checkpoints.db`。
+- **复杂度自动判断**：`classify_complexity` 节点通过 LLM + `ComplexityJudgment`（Pydantic 结构化输出）判断用户请求是否需要多步计划。判断标准：≥2 个工具调用、多步依赖、涉及多个子任务 → 复杂；简单闲聊、单次检索、仅读写用户信息 → 简单。
+- **计划生成与执行**：`generate_plan` 输出 `Plan` 对象（含 `steps` 列表和 `overall_goal`），每步指定 `action`（工具名）、`input`（参数，多参数工具用 JSON）、`expected`（期望输出）。`execute_step` 通过 `tool_map` 动态选择工具并调用，自动尝试 JSON 解析以支持 `save_user_info` 等多参数工具。
+- **动态进度检查与重规划**：`check_progress` 使用 LLM + `DeviationCheck` 判断上一步结果是否严重偏离预期。若失败或偏离 → `need_replan=True`，路由回 `generate_plan` 重新制定计划。`replan_count` 限制最多 3 次，防止无限循环。
+- **Pydantic 状态模型**：
+  - `PlanStep`：action / input / expected
+  - `Plan`：steps / overall_goal
+  - `StepResult`：step_index / success / output / deviation
+  - `ComplexityJudgment`：is_complex / reason
+  - `DeviationCheck`：deviation / reason
+- **状态定义 `AgentState`**：在原有 `messages`（`Annotated[list, add_messages]`）基础上扩展 `plan`、`current_step_index`、`step_results`、`need_replan`、`is_complex`、`final_summary`、`replan_count`。
 
 **对外接口**：
 
 | 函数 | 作用 |
 |------|------|
-| `create_agent(tools, get_session_history, llm_model, temperature, max_iterations)` | 创建并返回配置好的 CompiledStateGraph Agent |
+| `create_agent(tools, get_session_history, llm_model, temperature, max_iterations)` | 创建并返回配置好的 Plan-Act CompiledStateGraph |
 
 **调用方式**：
 
@@ -446,6 +487,47 @@ agent.invoke(
 
 ---
 
+### 4.8 `pages/chat.py` —— 聊天页面与执行计划可视化
+
+**业务职责**：Streamlit 聊天主页面，负责对话渲染、用户输入处理、Agent 流式输出，以及**复杂任务时的执行计划实时可视化**。
+
+**核心业务逻辑**：
+
+```
+用户输入消息
+    │
+    ├──▶ st.chat_message("user") 显示用户消息
+    │
+    ├──▶ agent.stream(..., stream_mode=["messages", "updates"])
+    │       │
+    │       ├──▶ messages 模式 ──▶ AIMessageChunk 逐字累加 ──▶ 实时更新助手回复
+    │       │
+    │       └──▶ updates 模式 ──▶ 节点状态变更
+    │               ├──▶ classify_complexity (is_complex=True)
+    │               │       └── 侧边栏渲染 📋 执行计划卡片
+    │               ├──▶ generate_plan ──▶ 显示计划步骤列表
+    │               ├──▶ execute_step ──▶ 更新当前步骤高亮
+    │               ├──▶ check_progress ──▶ 标记步骤成功/失败
+    │               └──▶ summarize_results ──▶ 汇总生成最终回答
+    │
+    └──▶ st.rerun() 从历史加载完整对话
+```
+
+**关键设计决策**：
+
+- **双模式流式输出 `stream_mode=["messages", "updates"]`**：`messages` 模式保留 AI 回复的逐字流式效果（`AIMessageChunk` 累加）；`updates` 模式捕获每个 LangGraph 节点的状态变更，用于驱动执行计划卡片的实时更新。两种模式并行，互不干扰。
+- **执行计划卡片 `_render_plan_card`**：在侧边栏动态渲染计划步骤，使用 Streamlit 原生组件区分状态：
+  - 已完成且成功 → `st.success()`（绿色 ✅）
+  - 已完成但失败/偏离 → `st.error()`（红色 ❌）
+  - 当前执行中 → `st.markdown(unsafe_allow_html=True)` + CSS `@keyframes` 闪烁动画（蓝色 ⏳）
+  - 未开始 → 普通 markdown（灰色 ⚪）
+- **Loading 状态提示**：根据 Agent 所处阶段（制定计划、执行步骤、重规划、生成回答），在主聊天区上方显示动态 `st.info()` / `st.warning()` 提示，让用户感知当前处理进度。
+- **计划状态持久化**：通过 `st.session_state["execution_plan"]` 保存最终计划结果，页面刷新（rerun）后执行计划卡片仍然保留在侧边栏，不会消失。发送新消息时自动清空上一次计划。
+
+**对外接口**：无直接对外函数，作为 Streamlit 页面运行。
+
+---
+
 ## 5. 架构图
 
 下图展示了系统的五层架构与各模块之间的数据依赖关系：
@@ -455,10 +537,17 @@ graph TB
     subgraph UI["用户界面层"]
         CLI["cli.py<br/>命令行交互"]
         WEB["streamlit_app.py + pages/<br/>Streamlit WebUI"]
+        CHAT["pages/chat.py<br/>聊天页 + 执行计划卡片"]
     end
 
     subgraph AGENT["智能体调度层"]
-        AGENT_CORE["agent.py<br/>LangGraph ReAct Agent"]
+        AGENT_CORE["agent.py<br/>Plan-Act 外层 StateGraph"]
+        CLASSIFY["classify_complexity<br/>复杂度判断"]
+        REACT["react_agent<br/>原 ReAct 子图"]
+        GEN_PLAN["generate_plan<br/>生成执行计划"]
+        EXEC_STEP["execute_step<br/>执行步骤"]
+        CHECK_PROG["check_progress<br/>检查进度 + replan"]
+        SUMMARIZE["summarize_results<br/>汇总结果"]
         SYS_PROMPT["系统提示词<br/>决策优先级 + 行为准则"]
         CHECKPOINTER["SqliteSaver<br/>checkpoints.db"]
     end
@@ -482,7 +571,18 @@ graph TB
     end
 
     CLI --> AGENT_CORE
-    WEB --> AGENT_CORE
+    WEB --> CHAT
+    CHAT --> AGENT_CORE
+    AGENT_CORE --> CLASSIFY
+    CLASSIFY --> REACT
+    CLASSIFY --> GEN_PLAN
+    GEN_PLAN --> EXEC_STEP
+    EXEC_STEP --> CHECK_PROG
+    CHECK_PROG --> GEN_PLAN
+    CHECK_PROG --> EXEC_STEP
+    CHECK_PROG --> SUMMARIZE
+    REACT --> SYS_PROMPT
+    REACT --> CHECKPOINTER
     AGENT_CORE --> SYS_PROMPT
     AGENT_CORE --> CHECKPOINTER
     AGENT_CORE --> RETRIEVE_DOC
@@ -505,11 +605,13 @@ graph TB
 
 **数据流说明**：
 
-1. **用户提问**（UI 层）→ Agent 接收消息，结合系统提示词决定行动策略。
-2. **工具调用**（工具层）→ Agent 按需调用检索、记忆或搜索工具，获取外部信息。
-3. **检索与存储**（服务层 + 数据持久层）→ 检索器从 Chroma 向量库召回相关文档；记忆读写操作对应 SQLite/JSON 文件。
-4. **结果回传** → 工具输出返回给 Agent，Agent 整合后生成最终回复，通过流式输出返回给用户。
-5. **状态持久化** → 整个对话状态由 SqliteSaver 写入 SQLite，实现跨会话恢复。
+1. **用户提问**（UI 层）→ `chat.py` 接收消息，通过 `stream_mode=["messages", "updates"]` 同时获取流式回复和节点状态更新。
+2. **复杂度判断**（智能体调度层）→ `classify_complexity` 判断任务简单或复杂。简单任务直接走 `react_agent` 子图；复杂任务进入 Plan-Act 流程。
+3. **计划生成与执行** → `generate_plan` 输出多步计划，`execute_step` 逐条调用工具，`check_progress` 检查执行结果。若偏离预期则自动重规划（最多 3 次），全部完成后由 `summarize_results` 汇总生成最终回答。
+4. **执行计划可视化** → `chat.py` 根据 `updates` 模式实时捕获节点状态，在侧边栏渲染执行计划卡片：已完成标绿、失败标红、当前步骤蓝色闪烁。
+5. **工具调用**（工具层）→ Agent 按需调用检索、记忆或搜索工具，获取外部信息。
+6. **检索与存储**（服务层 + 数据持久层）→ 检索器从 Chroma 向量库召回相关文档；记忆读写操作对应 SQLite/JSON 文件。
+7. **状态持久化** → 整个对话状态（包括 Plan、StepResult 等新增字段）由 SqliteSaver 写入 SQLite，实现跨会话恢复。
 
 ---
 
