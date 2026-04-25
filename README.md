@@ -1,4 +1,6 @@
 # 3-Day-Agent
+<img width="3071" height="1655" alt="image" src="https://github.com/user-attachments/assets/c86e979f-7ff2-419d-b72c-8e0b55a90b80" />
+
 
 > 🧠 **3 天，1 个 AI 导师，从零到全栈 Agent 应用。**  
 > 这不是速成班，而是一套用 AI 学会 AI 的协作学习方法。
