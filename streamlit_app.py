@@ -65,7 +65,12 @@ with center_col:
 
             # 构建检索器（Parent-Child 混合检索 + 重排序）
             try:
-                retriever = build_parent_child_hybrid_rerank_retriever(semantic_k=20, bm25_k=5, top_n=5)
+                from vector_store import is_parent_child_mode
+                if is_parent_child_mode("./data/chroma"):
+                    retriever = build_parent_child_hybrid_rerank_retriever(semantic_k=20, bm25_k=5, top_n=5)
+                else:
+                    st.info("当前向量库为旧版模式，在知识库页重建后可升级为 Parent-Child 分块策略。")
+                    retriever = build_hybrid_rerank_retriever(semantic_k=20, bm25_k=5, top_n=5)
             except Exception as e:
                 st.error(f"构建检索器失败: {e}")
                 st.stop()

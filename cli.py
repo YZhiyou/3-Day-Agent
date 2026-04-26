@@ -98,7 +98,13 @@ def main():
     print("输入 /help 查看命令。")
 
     # 启动前检查向量库是否存在，若不存在可提示先构建
-    retriever = build_parent_child_hybrid_rerank_retriever(semantic_k=20, bm25_k=5, top_n=5)
+    # Parent-Child 向量库不存在时自动降级到旧版混合检索器
+    from vector_store import is_parent_child_mode
+    if is_parent_child_mode(PERSIST_DIR):
+        retriever = build_parent_child_hybrid_rerank_retriever(semantic_k=20, bm25_k=5, top_n=5)
+    else:
+        print("提示: 当前向量库为旧版模式，执行 /kb rebuild 可升级为 Parent-Child 分块策略。")
+        retriever = build_hybrid_rerank_retriever(semantic_k=20, bm25_k=5, top_n=5)
 
     # 加载向量库实例（用于知识库管理）
     try:
