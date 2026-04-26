@@ -50,7 +50,8 @@ Day 3 的开发过程验证了一个核心洞察：**LangChain 的 import 路径
 | `langgraph>=1.1.9` | ReAct Agent 图编排 |
 | `langgraph-checkpoint-sqlite>=2.0.0` | 会话状态 SQLite 持久化 |
 | `chromadb>=1.5.8` | 本地向量数据库 |
-| `dashscope>=1.25.17` | 灵积平台 Embedding 服务 |
+| `dashscope>=1.25.17` | 灵积平台 Embedding / Rerank 服务 |
+| `rank-bm25>=0.2.2` | BM25 关键词检索（混合检索关键词通道） |
 | `pypdf>=6.10.2` | PDF 文档解析 |
 | `streamlit` | WebUI 框架 |
 | `duckduckgo-search>=8.1.1` | 联网搜索 |
@@ -248,35 +249,67 @@ Chroma.from_documents() ──▶ 持久化到 ./data/chroma
 
 ---
 
-### 4.2 `retriever.py` —— 检索策略封装与对外暴露
+### 4.2 `retriever.py` / `reranker.py` —— 检索策略封装与混合检索
 
-**业务职责**：从向量库中检索与查询语义最相关的文档片段，并以标准 `BaseRetriever` 形式供上层链式调用。
+**业务职责**：从向量库中召回相关文档，并封装多阶段检索 pipeline（语义检索 → 关键词精排 → RRF 融合 → Rerank 精排），以标准 `BaseRetriever` 形式供上层链式调用。
 
-**核心业务逻辑**：
+**核心业务逻辑（混合检索 pipeline）**：
 
 ```
 用户查询字符串
     │
-    ├──▶ similarity_search ──▶ 按余弦相似度返回 Top-K
+    ▼
+┌─────────────────────────────────────────────────────────┐
+│  Stage 1: 语义粗筛（Chroma 向量检索）                    │
+│  vectordb.as_retriever(search_kwargs={"k": 20})          │
+│  ──▶ 召回语义相关的 Top-20 候选文档                      │
+└─────────────────────────────────────────────────────────┘
     │
-    ├──▶ mmr_search ──▶ 最大边际相关性搜索（平衡相关性与多样性）
+    ▼
+┌─────────────────────────────────────────────────────────┐
+│  Stage 2: 关键词精排（BM25）                             │
+│  BM25Retriever.from_documents(candidates,                │
+│                  preprocess_func=_chinese_tokenizer)     │
+│  ──▶ 在候选集上做字面匹配，召回 Top-5                    │
+└─────────────────────────────────────────────────────────┘
     │
-    └──▶ similarity_search_with_threshold ──▶ 带相似度阈值过滤，剔除低质量结果
+    ▼
+┌─────────────────────────────────────────────────────────┐
+│  Stage 3: RRF 倒数排名融合                               │
+│  score = w_semantic * 1/(60+rank_semantic+1)             │
+│        + w_bm25     * 1/(60+rank_bm25+1)                 │
+│  ──▶ 合并双通道结果，重新排序                            │
+└─────────────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────────────┐
+│  Stage 4: Rerank 语义精排（DashScope qwen3-vl-rerank）   │
+│  ContextualCompressionRetriever                          │
+│  ──▶ 对融合结果二次打分，返回最相关 Top-5                │
+└─────────────────────────────────────────────────────────┘
 ```
+
+> 若 `rank-bm25` 未安装或 BM25 初始化失败，Stage 2/3 自动跳过，降级为纯语义检索 + Rerank。
 
 **关键设计决策**：
 
-- **提供两种使用形态**：
-  - `build_retriever()` 工厂函数：直接返回 LangChain 标准的 `BaseRetriever`，可无缝接入 LCEL 链或 Agent 工具。
-  - `RetrievalEngine` 类：面向需要精细控制检索参数的场景（如调整 MMR 的 `lambda_mult`、设置 `score_threshold`、添加元数据过滤等）。
+- **三档检索器按需切换**：
+  - `build_retriever()`：基础语义检索（向后兼容）。
+  - `build_rerank_retriever()`：语义检索 + DashScope Rerank 精排。
+  - `build_hybrid_rerank_retriever()`：完整混合检索 pipeline（语义 + BM25 + RRF + Rerank），为当前默认入口。
+- **粗筛架构避免全库 BM25 索引**：BM25 只在语义召回的 Top-20 候选上动态构建索引，既保证关键词匹配的精确性，又避免大知识库上全量 BM25 的内存与性能开销。
+- **自定义中文分词器 `_chinese_tokenizer`**：`rank-bm25` 默认按空格分词，对中文完全失效。`_chinese_tokenizer` 将连续中文字符逐字切分、英文/数字保留为整体，使 BM25 能正确识别 "SAM-PPO" 等中英混合术语。
+- **RRF 权重可配置**：默认 `[0.5, 0.5]`，语义与关键词通道平衡。若某类查询更依赖字面匹配，可调高关键词权重。
 - **阈值过滤的 score 转换**：Chroma 返回的是 L2 距离（越小越相似），代码中通过 `1 / (1 + distance)` 转换为近似的相似度分数（0~1），便于设置直观阈值。
-- **默认 search_kwargs={"k": 4}**：在召回充分性和上下文窗口长度之间取折中，Agent 每次检索不会带入过多冗余信息。
 
 **对外接口**：
 
 | 函数/类 | 作用 |
 |---------|------|
-| `build_retriever(persist_dir, search_type, search_kwargs)` | 工厂函数，返回配置好的 `BaseRetriever` |
+| `build_retriever(persist_dir, search_type, search_kwargs)` | 基础语义检索工厂函数（向后兼容） |
+| `build_rerank_retriever(persist_dir, top_k, top_n, model)` | 语义检索 + DashScope Rerank 精排 |
+| `build_hybrid_rerank_retriever(persist_dir, semantic_k, bm25_k, top_n, model, weights)` | 混合检索完整 pipeline（默认入口） |
+| `HybridRetriever` | 语义+BM25+RRF 混合检索器（BaseRetriever 子类） |
 | `RetrievalEngine.similarity_search(query, k, filter)` | 相似度搜索 |
 | `RetrievalEngine.mmr_search(query, k, fetch_k, lambda_mult)` | MMR 多样性搜索 |
 | `RetrievalEngine.similarity_search_with_threshold(query, score_threshold)` | 带阈值过滤的搜索 |
@@ -345,6 +378,7 @@ create_tools(user_id, retriever, enable_web_search)
 - **user_id 在工具创建时绑定**：`create_tools` 是工厂函数，在创建时就把 `user_id` 注入到 `save_user_info` 和 `get_user_info` 的闭包中。这保证多用户场景下，Agent 始终操作当前登录用户的记忆，而不会串号。
 - **联网搜索为可选项**：通过 `enable_web_search` 参数控制，方便在无网络环境或不需要实时信息的场景下关闭。
 - **检索结果截断与格式化**：`retrieve_documents` 将每段内容截断至 300 字符并标注来源，防止超长文档块撑爆 LLM 上下文窗口，同时让来源可追溯。
+- **检索工具描述反映真实 pipeline**：`retrieve_documents` 的 docstring 明确告知 Agent"检索结果经过混合检索（语义理解 + 精准关键词匹配）与语义重排序"，让 Agent 在回答时能更自信地引用排名靠前的结果，尤其适用于缩写和特定术语的精确查找。
 
 **对外接口**：
 
@@ -465,7 +499,8 @@ agent.invoke(
     │
     ├──▶ load_vector_store() ──▶ 加载 Chroma 向量库
     │
-    ├──▶ build_retriever() ──▶ 构建检索器
+    ├──▶ build_hybrid_rerank_retriever() ──▶ 构建混合检索器
+    │       （语义粗筛 → BM25 关键词精排 → RRF 融合 → DashScope Rerank）
     │
     ├──▶ create_tools(user_id, retriever) ──▶ 创建工具集
     │
@@ -478,7 +513,7 @@ agent.invoke(
 
 **关键设计决策**：
 
-- **登录即装配**：所有核心对象（vectordb、retriever、tools、agent）在登录时一次性创建并注入 `st.session_state`。后续页面（chat、kb、memory、history）直接从 session_state 读取，避免重复初始化。
+- **登录即装配**：所有核心对象（vectordb、retriever、tools、agent）在登录时一次性创建并注入 `st.session_state`。其中检索器默认使用 `build_hybrid_rerank_retriever()`（语义粗筛 + BM25 关键词精排 + RRF 融合 + DashScope Rerank 精排）。后续页面直接从 session_state 读取，避免重复初始化。
 - **错误拦截与友好提示**：向量库加载失败、检索器构建失败、工具创建失败、Agent 创建失败——每一步都有 `try/except` 捕获，并通过 `st.error()` 向用户展示中文错误信息，而不是抛出堆栈。
 - **隐藏默认侧边栏导航**：通过 CSS 隐藏 Streamlit 原生的多页面导航，改用自定义侧边栏按钮控制页面跳转，保持 UI 风格统一。
 - **多页面状态共享**：`st.session_state` 充当跨页面的全局状态容器，user_id、session_id、agent 实例等在各页面间无缝传递。
@@ -553,13 +588,15 @@ graph TB
     end
 
     subgraph TOOLS["工具层"]
-        RETRIEVE_DOC["retrieve_documents<br/>知识库检索"]
+        RETRIEVE_DOC["retrieve_documents<br/>混合检索 + Rerank"]
         USER_INFO["save/get_user_info<br/>长期记忆读写"]
         WEB_SEARCH["web_search<br/>联网搜索"]
     end
 
     subgraph SERVICE["服务层"]
         RETRIEVER["retriever.py<br/>检索策略封装"]
+        RERANKER["reranker.py<br/>DashScope Rerank 精排"]
+        HYBRID["HybridRetriever<br/>语义+BM25+RRF 混合检索"]
         KB_MGR["kb_manager.py<br/>知识库增删重建"]
     end
 
@@ -589,11 +626,14 @@ graph TB
     AGENT_CORE --> USER_INFO
     AGENT_CORE --> WEB_SEARCH
 
-    RETRIEVE_DOC --> RETRIEVER
+    RETRIEVE_DOC --> HYBRID
+    HYBRID --> RETRIEVER
+    HYBRID --> RERANKER
     USER_INFO --> MEM_LONG
     WEB_SEARCH --> DUCK["DuckDuckGo"]
 
     RETRIEVER --> VECTOR
+    RERANKER --> DASHSCOPE_RE["DashScope<br/>qwen3-vl-rerank"]
     KB_MGR --> VECTOR
     KB_MGR --> DOC_LOADER
 
@@ -610,7 +650,7 @@ graph TB
 3. **计划生成与执行** → `generate_plan` 输出多步计划，`execute_step` 逐条调用工具，`check_progress` 检查执行结果。若偏离预期则自动重规划（最多 3 次），全部完成后由 `summarize_results` 汇总生成最终回答。
 4. **执行计划可视化** → `chat.py` 根据 `updates` 模式实时捕获节点状态，在侧边栏渲染执行计划卡片：已完成标绿、失败标红、当前步骤蓝色闪烁。
 5. **工具调用**（工具层）→ Agent 按需调用检索、记忆或搜索工具，获取外部信息。
-6. **检索与存储**（服务层 + 数据持久层）→ 检索器从 Chroma 向量库召回相关文档；记忆读写操作对应 SQLite/JSON 文件。
+6. **检索与存储**（服务层 + 数据持久层）→ 混合检索 pipeline：Chroma 语义粗筛召回 Top-20 → BM25 在候选集上做关键词精排 → RRF 融合双通道结果 → DashScope Rerank 最终精排返回 Top-5。记忆读写操作对应 SQLite/JSON 文件。
 7. **状态持久化** → 整个对话状态（包括 Plan、StepResult 等新增字段）由 SqliteSaver 写入 SQLite，实现跨会话恢复。
 
 ---
