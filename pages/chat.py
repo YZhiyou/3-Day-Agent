@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from langchain_core.messages import AIMessage, AIMessageChunk
 from agent import create_agent
 from tools import create_tools
-from utils_web import _record_session, _load_chat_history
+from utils_web import _record_session, _load_chat_history, _update_session_title
 
 st.set_page_config(page_title="聊天", layout="wide")
 
@@ -158,6 +158,11 @@ if user_input:
     # 先显示用户刚发送的消息
     with st.chat_message("user"):
         st.markdown(user_input)
+
+    # 若是本会话的第一条消息，用用户输入生成会话标题
+    if not history:
+        title = user_input[:12] + ("..." if len(user_input) > 12 else "")
+        _update_session_title(user_id, st.session_state.session_id, title)
 
     # loading 状态提示
     loading_placeholder = st.empty()

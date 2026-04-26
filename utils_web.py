@@ -21,10 +21,10 @@ def _sessions_file(user_id: str) -> str:
     return os.path.join(USER_SESSIONS_DIR, f"{user_id}_sessions.json")
 
 
-def _record_session(user_id: str, session_id: str) -> None:
+def _record_session(user_id: str, session_id: str, title: str = None) -> None:
     """
     记录会话到用户会话列表中。
-    维护 data/user_sessions/{user_id}_sessions.json，记录 session_id 和创建时间。
+    维护 data/user_sessions/{user_id}_sessions.json，记录 session_id、标题和创建时间。
     """
     file_path = _sessions_file(user_id)
     sessions = []
@@ -35,22 +35,42 @@ def _record_session(user_id: str, session_id: str) -> None:
     if not any(s.get("session_id") == session_id for s in sessions):
         sessions.append({
             "session_id": session_id,
+            "title": title,
             "created": datetime.now().isoformat()
         })
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(sessions, f, ensure_ascii=False, indent=2)
 
 
+def _update_session_title(user_id: str, session_id: str, title: str) -> None:
+    """
+    更新已有会话的标题。
+    """
+    file_path = _sessions_file(user_id)
+    if not os.path.exists(file_path):
+        return
+    with open(file_path, "r", encoding="utf-8") as f:
+        sessions = json.load(f)
+    for s in sessions:
+        if s.get("session_id") == session_id:
+            s["title"] = title
+            break
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(sessions, f, ensure_ascii=False, indent=2)
+
+
 def _load_sessions(user_id: str) -> List[Dict[str, Any]]:
     """
-    读取用户的所有会话记录。
+    读取用户的所有会话记录，按创建时间倒序排列（最新的在最上面）。
     从 data/user_sessions/{user_id}_sessions.json 读取。
     """
     file_path = _sessions_file(user_id)
     if not os.path.exists(file_path):
         return []
     with open(file_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        sessions = json.load(f)
+    sessions.sort(key=lambda s: s.get("created", ""), reverse=True)
+    return sessions
 
 
 def _delete_session_record(user_id: str, session_id: str) -> None:

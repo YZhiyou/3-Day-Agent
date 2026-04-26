@@ -34,7 +34,7 @@ if not sessions:
 else:
     # 表头
     header_cols = st.columns([3, 3, 2, 2])
-    header_cols[0].markdown("**会话 ID**")
+    header_cols[0].markdown("**会话标题**")
     header_cols[1].markdown("**创建时间**")
     header_cols[2].markdown("**进入**")
     header_cols[3].markdown("**删除**")
@@ -43,9 +43,12 @@ else:
 
     for s in sessions:
         sid = s.get("session_id", "")
+        title = s.get("title") or sid
         created = s.get("created", "")
         cols = st.columns([3, 3, 2, 2])
-        cols[0].text(sid)
+        cols[0].markdown(f"**{title}**")
+        if s.get("title"):
+            cols[0].caption(f"`{sid}`")
         cols[1].text(created)
 
         if cols[2].button("进入", key=f"enter_{sid}"):
