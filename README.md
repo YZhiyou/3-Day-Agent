@@ -139,6 +139,8 @@ Agent 的系统提示词中内置了决策优先级：
 4. 绝不编造信息，知识库无结果时诚实告知
 
 **Plan-Act 模式决策流程**：
+<img width="3061" height="1584" alt="image" src="https://github.com/user-attachments/assets/0b4550df-c598-482b-8792-fd9d3a1955f1" />
+
 - 用户输入首先经过 `classify_complexity` 判断复杂度
 - **简单任务**（闲聊、单次检索、单步读写）→ 直接由原 ReAct Agent 处理
 - **复杂任务**（≥2 个工具、多步依赖）→ 自动生成执行计划 → 逐条执行 → 检查进度 → 偏离时自动重规划（最多 3 次）→ 汇总生成最终回答
