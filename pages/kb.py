@@ -110,6 +110,36 @@ with tab_rebuild:
         if confirm:
             try:
                 with st.spinner("正在重建知识库..."):
+                    # 1. 彻底释放旧向量库的文件句柄
+                    # 先切断 session_state 中所有可能间接引用 vectordb 的对象
+                    old_vectordb = st.session_state.pop("vectordb", None)
+                    st.session_state.pop("retriever", None)
+                    st.session_state.pop("agent", None)
+
+                    if old_vectordb:
+                        try:
+                            # 关闭 chromadb 底层 PersistentClient
+                            if hasattr(old_vectordb, "_client") and hasattr(old_vectordb._client, "close"):
+                                old_vectordb._client.close()
+                            # 释放 collection 引用（可能持有 mmap）
+                            if hasattr(old_vectordb, "_collection"):
+                                old_vectordb._collection = None
+                        except Exception:
+                            pass
+                        del old_vectordb
+
+                    # 删除本页面顶部创建的局部变量引用，避免阻止 GC
+                    try:
+                        del vectordb
+                    except NameError:
+                        pass
+
+                    import gc
+                    gc.collect()
+                    gc.collect()
+                    import time
+                    time.sleep(2.0)  # Windows 释放文件锁需要更长时间
+
                     new_vectordb = rebuild_kb("./data/chroma", docs_dir)
                     new_retriever = build_retriever()
                     new_tools = create_tools(st.session_state.user_id, new_retriever)

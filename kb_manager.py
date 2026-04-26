@@ -99,27 +99,52 @@ def rebuild_kb(persist_dir: str, docs_directory: str) -> Chroma:
     # 强制垃圾回收，释放可能持有的文件句柄
     gc.collect()
 
-    if os.path.exists(persist_dir):
-        # Windows 下文件句柄释放可能有延迟，允许短暂重试
-        max_retries = 5
-        for i in range(max_retries):
-            try:
-                shutil.rmtree(persist_dir)
-                logger.info(f"已删除旧向量库目录: {persist_dir}")
-                break
-            except PermissionError:
-                if i < max_retries - 1:
-                    time.sleep(0.5)
-                    gc.collect()
-                else:
-                    raise
-
     if not os.path.exists(docs_directory):
         raise FileNotFoundError(f"文档目录不存在: {docs_directory}")
 
     docs = load_documents(docs_directory)
     if not docs:
         logger.warning(f"在 {docs_directory} 中未找到任何支持的文档。")
+
+    # Windows 上 HNSW 索引文件（data_level0.bin）的 mmap 锁非常顽固，
+    # 物理删除目录经常失败。因此采用"复用目录 + 逻辑清空 collection"策略。
+    if os.path.exists(persist_dir):
+        try:
+            existing_db = load_vector_store(persist_dir)
+            # 优先尝试直接删除整个 collection（释放 HNSW 索引文件最彻底）
+            try:
+                existing_db._client.delete_collection("langchain")
+                logger.info("已删除现有向量库 collection。")
+            except Exception:
+                # 回退：逐个删除所有文档
+                result = existing_db.get()
+                existing_ids = result.get("ids", []) if result else []
+                if existing_ids:
+                    existing_db.delete(ids=existing_ids)
+                    logger.info(f"已清空现有向量库中的 {len(existing_ids)} 个文档。")
+            # 关闭底层 client，给 Windows 释放文件锁的机会
+            if hasattr(existing_db, "_client") and hasattr(existing_db._client, "close"):
+                existing_db._client.close()
+            del existing_db
+            gc.collect()
+            time.sleep(1.0)
+        except Exception as e:
+            logger.warning(f"无法复用现有向量库，尝试物理删除目录: {e}")
+            max_retries = 10
+            for i in range(max_retries):
+                try:
+                    shutil.rmtree(persist_dir)
+                    logger.info(f"已删除旧向量库目录: {persist_dir}")
+                    break
+                except (PermissionError, OSError) as exc:
+                    if i < max_retries - 1:
+                        time.sleep(1.0)
+                        gc.collect()
+                    else:
+                        raise PermissionError(
+                            f"无法删除旧向量库目录 '{persist_dir}'，文件仍被占用。"
+                            f"请尝试重启 Streamlit 应用后再重建。原始错误: {exc}"
+                        ) from exc
 
     vectordb = create_vector_store(docs, persist_dir=persist_dir)
     logger.info(f"知识库重建完成，持久化到: {persist_dir}")
