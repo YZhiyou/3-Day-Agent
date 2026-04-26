@@ -2,6 +2,7 @@ from typing import List, Callable, Optional, TypedDict, Annotated
 from pydantic import BaseModel, Field
 from langchain_core.tools import BaseTool
 from langchain_core.messages import AIMessage, SystemMessage, HumanMessage
+from langchain_core.output_parsers import PydanticOutputParser
 from langchain.chat_models import init_chat_model
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
@@ -102,12 +103,13 @@ def _build_react_agent(
 # ---------------- Plan-Act 节点函数 ----------------
 
 def _classify_complexity(state: AgentState, llm, tools: List[BaseTool]) -> dict:
-    """判断用户请求的复杂度。"""
+    """判断用户请求的复杂度（使用 PydanticOutputParser）。"""
     user_content = _get_last_user_content(state["messages"])
     if not user_content:
         return {"is_complex": False}
 
     tool_desc = _build_tool_descriptions(tools)
+    parser = PydanticOutputParser(pydantic_object=ComplexityJudgment)
 
     prompt = f"""你是一个任务复杂度判断助手。请分析用户的请求，判断它是否需要复杂的计划-执行流程。
 
@@ -120,17 +122,21 @@ def _classify_complexity(state: AgentState, llm, tools: List[BaseTool]) -> dict:
 
 用户请求：{user_content}
 
-请输出判断结果。"""
+{parser.get_format_instructions()}"""
 
-    structured_llm = llm.with_structured_output(ComplexityJudgment)
-    result = structured_llm.invoke([SystemMessage(content=prompt)])
+    response = llm.invoke([SystemMessage(content=prompt)])
+    try:
+        result = parser.parse(response.content)
+    except Exception:
+        result = ComplexityJudgment(is_complex=False, reason="解析失败，默认简单")
     return {"is_complex": result.is_complex}
 
 
 def _generate_plan(state: AgentState, llm, tools: List[BaseTool]) -> dict:
-    """为复杂任务生成执行计划。"""
+    """为复杂任务生成执行计划（使用 PydanticOutputParser）。"""
     user_content = _get_last_user_content(state["messages"])
     tool_desc = _build_tool_descriptions(tools)
+    parser = PydanticOutputParser(pydantic_object=Plan)
 
     prompt = f"""你是一个任务规划助手。请根据用户请求制定一个详细的执行计划。
 
@@ -146,10 +152,16 @@ def _generate_plan(state: AgentState, llm, tools: List[BaseTool]) -> dict:
 
 用户请求：{user_content}
 
-请输出执行计划。"""
+{parser.get_format_instructions()}"""
 
-    structured_llm = llm.with_structured_output(Plan)
-    plan = structured_llm.invoke([SystemMessage(content=prompt)])
+    response = llm.invoke([SystemMessage(content=prompt)])
+    try:
+        plan = parser.parse(response.content)
+    except Exception:
+        plan = Plan(
+            steps=[PlanStep(action="retrieve_documents", input=user_content, expected="搜索结果")],
+            overall_goal=f"回答用户请求: {user_content}",
+        )
 
     replan_count = state.get("replan_count", 0)
     return {
@@ -249,11 +261,13 @@ def _check_progress(state: AgentState, llm) -> dict:
 
 是否严重偏离？如果结果完全不符合预期或无法继续后续步骤，回答 True；否则回答 False。"""
 
-        structured_llm = llm.with_structured_output(DeviationCheck)
+        parser = PydanticOutputParser(pydantic_object=DeviationCheck)
+        full_prompt = prompt + "\n\n" + parser.get_format_instructions()
+        response = llm.invoke([SystemMessage(content=full_prompt)])
         try:
-            check = structured_llm.invoke([SystemMessage(content=prompt)])
+            check = parser.parse(response.content)
         except Exception:
-            check = DeviationCheck(deviation=False, reason="检查失败，默认不偏离")
+            check = DeviationCheck(deviation=False, reason="解析失败，默认不偏离")
 
         step_results = list(step_results)
         step_results[-1] = StepResult(
