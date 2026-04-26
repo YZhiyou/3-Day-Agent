@@ -6,7 +6,17 @@ from typing import List, Optional, Callable
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 
-from vector_store import add_documents, load_vector_store, create_vector_store
+from vector_store import (
+    add_documents,
+    load_vector_store,
+    create_vector_store,
+    create_parent_child_vector_store,
+    add_documents_parent_child,
+    delete_documents_parent_child,
+    load_parent_child_vector_store,
+    is_parent_child_mode,
+    JsonDocstore,
+)
 from document_loader import load_documents, SUPPORTED_EXT
 
 logger = logging.getLogger(__name__)
@@ -34,13 +44,18 @@ def _load_single_file(file_path: str) -> List[Document]:
     return docs
 
 
-def add_file_to_kb(vectordb: Chroma, file_path: str) -> str:
+def add_file_to_kb(
+    vectordb: Chroma,
+    file_path: str,
+    persist_dir: Optional[str] = None,
+) -> str:
     """
     将单个文件添加到知识库。
 
     Args:
         vectordb: Chroma 向量库实例。
         file_path: 要添加的文件路径。
+        persist_dir: 向量库持久化目录（Parent-Child 模式下需传入以定位 docstore）。
 
     Returns:
         操作结果描述字符串。
@@ -52,25 +67,45 @@ def add_file_to_kb(vectordb: Chroma, file_path: str) -> str:
         docs = _load_single_file(file_path)
         if not docs:
             return f"文件内容为空或加载失败: {file_path}"
-        add_documents(vectordb, docs)
-        return f"已成功添加文件到知识库: {os.path.basename(file_path)} (共 {len(docs)} 个片段)"
+
+        # 自动检测并使用 Parent-Child 模式
+        if persist_dir and is_parent_child_mode(persist_dir):
+            docstore = load_parent_child_vector_store(persist_dir)[1]
+            add_documents_parent_child(vectordb, docstore, docs)
+            return f"已成功添加文件到知识库(Parent-Child): {os.path.basename(file_path)}"
+        else:
+            add_documents(vectordb, docs)
+            return f"已成功添加文件到知识库: {os.path.basename(file_path)} (共 {len(docs)} 个片段)"
     except Exception as e:
         logger.exception("添加文件到知识库失败")
         return f"添加失败: {e}"
 
 
-def delete_file_from_kb(vectordb: Chroma, file_path: str) -> str:
+def delete_file_from_kb(
+    vectordb: Chroma,
+    file_path: str,
+    persist_dir: Optional[str] = None,
+) -> str:
     """
     从知识库中删除指定文件的所有文档块。
 
     Args:
         vectordb: Chroma 向量库实例。
         file_path: 要删除的文件路径（与添加时的 source 元数据匹配）。
+        persist_dir: 向量库持久化目录（Parent-Child 模式下需传入以定位 docstore）。
 
     Returns:
         操作结果描述字符串。
     """
     try:
+        # Parent-Child 模式：需要联动删除 docstore 中的父块
+        if persist_dir and is_parent_child_mode(persist_dir):
+            docstore = load_parent_child_vector_store(persist_dir)[1]
+            delete_documents_parent_child(
+                vectordb, docstore, filter={"source": file_path}
+            )
+            return f"已删除文件 '{os.path.basename(file_path)}' 的所有文档块（含父块）。"
+
         result = vectordb.get(where={"source": file_path})
         ids = result.get("ids", [])
         if not ids:
@@ -186,13 +221,13 @@ def rebuild_kb(
         if progress_callback:
             progress_callback("clear", 1, 1, "旧向量数据已清空")
 
-    # 创建新向量库（内部采用分批嵌入，避免 API 超时）
-    vectordb = create_vector_store(
+    # 创建新向量库（采用 Parent-Child 模式）
+    vectordb, _docstore = create_parent_child_vector_store(
         all_docs,
         persist_dir=persist_dir,
         progress_callback=progress_callback,
     )
-    logger.info(f"知识库重建完成，持久化到: {persist_dir}")
+    logger.info(f"知识库重建完成（Parent-Child 模式），持久化到: {persist_dir}")
     return vectordb
 
 

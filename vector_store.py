@@ -1,14 +1,17 @@
+import json
 import os
 import re
 import logging
 from pathlib import Path
+from typing import List, Tuple, Optional, Dict, Any, Callable, Iterator, Sequence
 from dotenv import load_dotenv
 
-from typing import List, Tuple, Optional, Dict, Any, Callable
 from langchain_core.documents import Document
+from langchain_core.stores import BaseStore
 from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
 from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_chroma import Chroma
+from langchain_classic.retrievers.parent_document_retriever import ParentDocumentRetriever
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -432,4 +435,299 @@ def get_collection_stats(vectordb: Chroma) -> Dict[str, Any]:
     logger.info(f"向量库统计信息: {stats}")
     return stats
 
+
+# ---------- Parent-Child 模式支持 ----------
+
+class JsonDocstore(BaseStore[str, Document]):
+    """
+    基于 JSON 文件的 Document 存储，用于 Parent-Child 模式的父文档持久化。
+
+    实现 langchain_core.stores.BaseStore 接口，与 ParentDocumentRetriever 兼容。
+    每次 mset/mdelete 后自动同步到磁盘，确保进程重启后父文档不丢失。
+    """
+
+    def __init__(self, file_path: str):
+        self.file_path = file_path
+        self._data: Dict[str, Document] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if os.path.exists(self.file_path):
+            try:
+                with open(self.file_path, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                for k, v in raw.items():
+                    self._data[k] = Document(
+                        page_content=v.get("page_content", ""),
+                        metadata=v.get("metadata", {}),
+                    )
+            except Exception as exc:
+                logger.warning(f"加载 docstore 失败: {exc}，将以空 store 启动")
+
+    def _save(self) -> None:
+        os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
+        raw = {
+            k: {"page_content": doc.page_content, "metadata": doc.metadata}
+            for k, doc in self._data.items()
+        }
+        with open(self.file_path, "w", encoding="utf-8") as f:
+            json.dump(raw, f, ensure_ascii=False, indent=2)
+
+    def mget(self, keys: Sequence[str]) -> List[Optional[Document]]:
+        return [self._data.get(k) for k in keys]
+
+    def mset(self, key_value_pairs: Sequence[tuple[str, Document]]) -> None:
+        for k, v in key_value_pairs:
+            self._data[k] = v
+        self._save()
+
+    def mdelete(self, keys: Sequence[str]) -> None:
+        for k in keys:
+            self._data.pop(k, None)
+        self._save()
+
+    def yield_keys(self, *, prefix: Optional[str] = None) -> Iterator[str]:
+        for k in self._data:
+            if prefix is None or k.startswith(prefix):
+                yield k
+
+
+def is_parent_child_mode(persist_dir: str = "./data/chroma") -> bool:
+    """检查指定目录是否使用了 Parent-Child 模式（通过 docstore.json 存在性判断）。"""
+    return os.path.exists(os.path.join(persist_dir, "docstore.json"))
+
+
+def create_parent_child_vector_store(
+    documents: List[Document],
+    persist_dir: str = "./data/chroma",
+    chunk_size: int = 1000,
+    chunk_overlap: int = 200,
+    child_chunk_size: int = 300,
+    child_chunk_overlap: int = 50,
+    batch_size: int = 10,
+    progress_callback: Optional[Callable[[str, int, int, str], None]] = None,
+) -> tuple[Chroma, JsonDocstore]:
+    """
+    使用 Parent-Child 模式创建 Chroma 向量存储。
+
+    工作流程：
+    1. 先用 _smart_split_documents 创建父块（Markdown 标题感知 / 通用中文友好）
+    2. ParentDocumentRetriever 将每个父块细分为子块（chunk_size=300）
+    3. 子块存入 Chroma 向量库（用于向量检索），父块存入 JsonDocstore（用于返回完整上下文）
+
+    Args:
+        documents: 原始文档列表。
+        persist_dir: 持久化目录路径。
+        chunk_size: 父块分块大小。
+        chunk_overlap: 父块分块重叠大小。
+        child_chunk_size: 子块分块大小。
+        child_chunk_overlap: 子块分块重叠大小。
+        batch_size: 每批嵌入的父块数量。
+        progress_callback: 进度回调函数。
+
+    Returns:
+        (Chroma 向量库实例, JsonDocstore 父文档存储实例)
+    """
+    # 1. 父块分割（保持原有的文件类型感知路由）
+    if progress_callback:
+        progress_callback("split", 0, 1, "正在分割父块文档...")
+
+    parent_docs = _smart_split_documents(documents, chunk_size, chunk_overlap)
+    for doc in parent_docs:
+        doc.page_content = _clean_text(doc.page_content)
+
+    if progress_callback:
+        progress_callback("split", 1, 1, f"父块已分割为 {len(parent_docs)} 个")
+
+    # 2. 初始化嵌入模型与 Chroma
+    embeddings = _get_embeddings()
+    Path(persist_dir).parent.mkdir(parents=True, exist_ok=True)
+
+    if progress_callback:
+        progress_callback("create", 0, 1, "正在初始化 Parent-Child 向量库...")
+
+    vectordb = Chroma(persist_directory=persist_dir, embedding_function=embeddings)
+
+    docstore_path = os.path.join(persist_dir, "docstore.json")
+    docstore = JsonDocstore(docstore_path)
+
+    child_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=child_chunk_size,
+        chunk_overlap=child_chunk_overlap,
+        separators=["\n\n", "\n", "。", "！", "？", "；", " ", ""],
+    )
+
+    parent_retriever = ParentDocumentRetriever(
+        vectorstore=vectordb,
+        docstore=docstore,
+        child_splitter=child_splitter,
+        parent_splitter=None,  # 父块已由 _smart_split_documents 完成
+        search_kwargs={"k": 20},
+    )
+
+    if progress_callback:
+        progress_callback("create", 1, 1, "Parent-Child 向量库初始化完成")
+
+    # 3. 分批添加父块（ParentDocumentRetriever 内部自动完成子块分割与双写）
+    total = len(parent_docs)
+    for i in range(0, total, batch_size):
+        batch = parent_docs[i : i + batch_size]
+
+        for attempt in range(3):
+            try:
+                parent_retriever.add_documents(batch)
+                break
+            except Exception as exc:
+                if attempt < 2:
+                    wait = 2 ** (attempt + 1)
+                    logger.warning(
+                        f"Parent-Child 嵌入批次失败（{i + 1}-{min(i + batch_size, total)}），"
+                        f"{wait}s 后第 {attempt + 2} 次重试: {exc}"
+                    )
+                    import time
+                    time.sleep(wait)
+                else:
+                    logger.error(
+                        f"Parent-Child 嵌入批次最终失败（{i + 1}-{min(i + batch_size, total)}）: {exc}"
+                    )
+                    raise
+
+        if progress_callback:
+            progress_callback(
+                "embed",
+                min(i + batch_size, total),
+                total,
+                f"正在嵌入父块... ({min(i + batch_size, total)}/{total})",
+            )
+
+    logger.info(
+        f"Parent-Child vector store created: {total} parent chunks, "
+        f"persisted to '{persist_dir}' with docstore '{docstore_path}'."
+    )
+    return vectordb, docstore
+
+
+def load_parent_child_vector_store(
+    persist_dir: str = "./data/chroma",
+) -> tuple[Chroma, JsonDocstore]:
+    """
+    加载已有的 Parent-Child 模式向量存储。
+
+    Args:
+        persist_dir: 持久化目录路径。
+
+    Returns:
+        (Chroma 实例, JsonDocstore 实例)
+
+    Raises:
+        FileNotFoundError: 如果向量库或 docstore 不存在。
+    """
+    if not os.path.exists(persist_dir) or not os.listdir(persist_dir):
+        raise FileNotFoundError(f"在 {persist_dir} 未找到已持久化的向量库。")
+
+    embeddings = _get_embeddings()
+    vectordb = Chroma(persist_directory=persist_dir, embedding_function=embeddings)
+
+    docstore_path = os.path.join(persist_dir, "docstore.json")
+    if not os.path.exists(docstore_path):
+        raise FileNotFoundError(
+            f"在 {docstore_path} 未找到 Parent-Child 的 docstore。"
+            f"如需使用旧版向量库，请调用 load_vector_store()。"
+        )
+
+    docstore = JsonDocstore(docstore_path)
+    logger.info(f"已从 '{persist_dir}' 加载 Parent-Child 向量库及 docstore。")
+    return vectordb, docstore
+
+
+def add_documents_parent_child(
+    vectordb: Chroma,
+    docstore: JsonDocstore,
+    documents: List[Document],
+    chunk_size: int = 1000,
+    chunk_overlap: int = 200,
+    child_chunk_size: int = 300,
+    child_chunk_overlap: int = 50,
+) -> None:
+    """
+    向 Parent-Child 向量存储中增量添加文档。
+
+    Args:
+        vectordb: Chroma 实例。
+        docstore: JsonDocstore 实例。
+        documents: 要添加的新文档列表。
+        chunk_size: 父块分块大小。
+        chunk_overlap: 父块分块重叠大小。
+        child_chunk_size: 子块分块大小。
+        child_chunk_overlap: 子块分块重叠大小。
+    """
+    parent_docs = _smart_split_documents(documents, chunk_size, chunk_overlap)
+    for doc in parent_docs:
+        doc.page_content = _clean_text(doc.page_content)
+
+    child_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=child_chunk_size,
+        chunk_overlap=child_chunk_overlap,
+        separators=["\n\n", "\n", "。", "！", "？", "；", " ", ""],
+    )
+
+    parent_retriever = ParentDocumentRetriever(
+        vectorstore=vectordb,
+        docstore=docstore,
+        child_splitter=child_splitter,
+        parent_splitter=None,
+        search_kwargs={"k": 20},
+    )
+
+    parent_retriever.add_documents(parent_docs)
+    logger.info(f"已向 Parent-Child 向量库添加 {len(parent_docs)} 个父块。")
+
+
+def delete_documents_parent_child(
+    vectordb: Chroma,
+    docstore: JsonDocstore,
+    ids: Optional[List[str]] = None,
+    filter: Optional[Dict[str, Any]] = None,
+) -> Optional[bool]:
+    """
+    在 Parent-Child 模式下删除文档（同时清理 vectorstore 中的子块和 docstore 中的父块）。
+
+    Args:
+        vectordb: Chroma 向量存储实例。
+        docstore: JsonDocstore 实例。
+        ids: 要删除的文档 ID 列表。
+        filter: 可选的元数据过滤条件（会按 source 查找到所有子块，再联动删除父块）。
+
+    Returns:
+        删除是否成功。
+    """
+    try:
+        if filter is not None:
+            result = vectordb.get(where=filter)
+            ids = result.get("ids", []) if result else []
+            metadatas = result.get("metadatas", []) if result else []
+            doc_ids = set()
+            for meta in metadatas:
+                if isinstance(meta, dict) and "doc_id" in meta:
+                    doc_ids.add(meta["doc_id"])
+            if doc_ids:
+                docstore.mdelete(list(doc_ids))
+                logger.info(f"已从 docstore 删除 {len(doc_ids)} 个父块。")
+        elif ids is not None:
+            # 按子块 ID 查 doc_id 再删父块（效率较低，建议优先用 filter）
+            result = vectordb.get(ids=ids)
+            metadatas = result.get("metadatas", []) if result else []
+            doc_ids = set()
+            for meta in metadatas:
+                if isinstance(meta, dict) and "doc_id" in meta:
+                    doc_ids.add(meta["doc_id"])
+            if doc_ids:
+                docstore.mdelete(list(doc_ids))
+
+        result = vectordb.delete(ids=ids, filter=filter)
+        logger.info(f"已删除 vectorstore 中的子块 (ids={ids is not None}, filter={filter is not None})。")
+        return result
+    except Exception as exc:
+        logger.error(f"Parent-Child 删除失败: {exc}")
+        raise
 

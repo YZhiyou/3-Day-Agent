@@ -7,9 +7,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kb_manager import add_file_to_kb, delete_file_from_kb, rebuild_kb, search_kb
 from vector_store import get_collection_stats
-from retriever import build_retriever
+from retriever import build_parent_child_hybrid_rerank_retriever
 from tools import create_tools
 from agent import create_agent
+
+PERSIST_DIR = "./data/chroma"
 from utils_web import _preprocess_latex
 
 st.set_page_config(page_title="知识库", layout="wide")
@@ -60,7 +62,7 @@ with tab_files:
             st.subheader("删除文件")
             file_to_delete = st.selectbox("选择要删除的文件", list(sources.keys()))
             if st.button("删除", key="btn_delete_file"):
-                msg = delete_file_from_kb(vectordb, file_to_delete)
+                msg = delete_file_from_kb(vectordb, file_to_delete, persist_dir=PERSIST_DIR)
                 if "已删除" in msg or "成功" in msg:
                     st.success(msg)
                 else:
@@ -94,7 +96,7 @@ with tab_add:
             tmp.write(uploaded.getvalue())
             tmp_path = tmp.name
         try:
-            msg = add_file_to_kb(vectordb, tmp_path)
+            msg = add_file_to_kb(vectordb, tmp_path, persist_dir=PERSIST_DIR)
             if "成功" in msg:
                 st.success(msg)
             else:
@@ -161,7 +163,7 @@ with tab_rebuild:
                     new_vectordb = rebuild_kb(
                         "./data/chroma", docs_dir, progress_callback=tracker
                     )
-                    new_retriever = build_retriever()
+                    new_retriever = build_parent_child_hybrid_rerank_retriever(semantic_k=20, bm25_k=5, top_n=5)
                     new_tools = create_tools(st.session_state.user_id, new_retriever)
                     new_agent = create_agent(new_tools)
                     st.session_state.vectordb = new_vectordb

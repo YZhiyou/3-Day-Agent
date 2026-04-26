@@ -7,7 +7,14 @@ from langchain_core.retrievers import BaseRetriever
 from langchain_core.documents import Document
 from langchain_chroma import Chroma
 
-from vector_store import load_vector_store, get_collection_stats
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_classic.retrievers.parent_document_retriever import ParentDocumentRetriever
+
+from vector_store import (
+    load_vector_store,
+    get_collection_stats,
+    load_parent_child_vector_store,
+)
 from reranker import get_compression_retriever
 
 
@@ -229,6 +236,71 @@ def build_hybrid_rerank_retriever(
         f"Hybrid rerank retriever built: search_type={search_type}, "
         f"semantic_k={semantic_k}, bm25_k={bm25_k}, top_n={top_n}, "
         f"weights={weights}, model={model}"
+    )
+    return compression_retriever
+
+
+def build_parent_child_hybrid_rerank_retriever(
+    persist_dir: str = "./data/chroma",
+    search_type: str = "similarity",
+    semantic_k: int = 20,
+    bm25_k: int = 5,
+    top_n: int = 5,
+    model: str = "qwen3-vl-rerank",
+    weights: Optional[List[float]] = None,
+) -> BaseRetriever:
+    """
+    构建 Parent-Child 混合检索 + Rerank 精排检索器。
+
+    工作流程：
+    1. ParentDocumentRetriever 通过子块向量相似度检索，返回父块（完整上下文）
+    2. HybridRetriever 在父块上叠加 BM25 关键词精排 + RRF 融合
+    3. DashScope Reranker 对融合结果最终精排，返回 top_n
+
+    Args:
+        persist_dir: 向量库持久化目录。
+        search_type: 搜索类型（ParentDocumentRetriever 内部使用）。
+        semantic_k: 子块向量检索召回数量（对应父块数量）。
+        bm25_k: 关键词通路召回数量。
+        top_n: Rerank 后最终返回数量。
+        model: 重排序模型名称。
+        weights: RRF 融合权重 [语义权重, 关键词权重]，默认 [0.5, 0.5]。
+
+    Returns:
+        带 Parent-Child 混合检索和重排序能力的检索器实例。
+    """
+    if weights is None:
+        weights = [0.5, 0.5]
+
+    vectordb, docstore = load_parent_child_vector_store(persist_dir)
+
+    child_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=300,
+        chunk_overlap=50,
+        separators=["\n\n", "\n", "。", "！", "？", "；", " ", ""],
+    )
+
+    parent_retriever = ParentDocumentRetriever(
+        vectorstore=vectordb,
+        docstore=docstore,
+        child_splitter=child_splitter,
+        parent_splitter=None,
+        search_kwargs={"k": semantic_k},
+    )
+
+    hybrid = HybridRetriever(
+        semantic_retriever=parent_retriever,
+        semantic_k=semantic_k,
+        bm25_k=bm25_k,
+        weights=weights,
+    )
+
+    compression_retriever = get_compression_retriever(
+        hybrid, model=model, top_n=top_n
+    )
+    logger.info(
+        f"Parent-Child hybrid rerank retriever built: semantic_k={semantic_k}, "
+        f"bm25_k={bm25_k}, top_n={top_n}, weights={weights}, model={model}"
     )
     return compression_retriever
 

@@ -17,7 +17,12 @@ for k in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
 
 from langchain_core.messages import AIMessageChunk, HumanMessage, AIMessage
 
-from retriever import build_retriever, build_rerank_retriever, build_hybrid_rerank_retriever
+from retriever import (
+    build_retriever,
+    build_rerank_retriever,
+    build_hybrid_rerank_retriever,
+    build_parent_child_hybrid_rerank_retriever,
+)
 from memory_manager import get_session_history
 from tools import create_tools
 from agent import create_agent
@@ -93,7 +98,7 @@ def main():
     print("输入 /help 查看命令。")
 
     # 启动前检查向量库是否存在，若不存在可提示先构建
-    retriever = build_hybrid_rerank_retriever(semantic_k=20, bm25_k=5, top_n=5)
+    retriever = build_parent_child_hybrid_rerank_retriever(semantic_k=20, bm25_k=5, top_n=5)
 
     # 加载向量库实例（用于知识库管理）
     try:
@@ -186,7 +191,7 @@ def main():
                     if vectordb is None:
                         print("向量库未加载，无法添加。")
                         continue
-                    print(add_file_to_kb(vectordb, subarg))
+                    print(add_file_to_kb(vectordb, subarg, persist_dir=PERSIST_DIR))
 
                 elif subcmd == "delete":
                     if not subarg:
@@ -195,7 +200,7 @@ def main():
                     if vectordb is None:
                         print("向量库未加载，无法删除。")
                         continue
-                    print(delete_file_from_kb(vectordb, subarg))
+                    print(delete_file_from_kb(vectordb, subarg, persist_dir=PERSIST_DIR))
 
                 elif subcmd == "rebuild":
                     if vectordb is None:
@@ -206,7 +211,7 @@ def main():
                         try:
                             vectordb = rebuild_kb(PERSIST_DIR, DOCS_DIR)
                             # 重建后 retriever 可能持有旧的 vectordb 引用，需要重建
-                            retriever = build_hybrid_rerank_retriever(semantic_k=20, bm25_k=5, top_n=5)
+                            retriever = build_parent_child_hybrid_rerank_retriever(semantic_k=20, bm25_k=5, top_n=5)
                             print("知识库重建完成。")
                         except Exception as e:
                             print(f"重建失败: {e}")
