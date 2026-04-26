@@ -6,6 +6,7 @@ from langchain_core.documents import Document
 from langchain_chroma import Chroma
 
 from vector_store import load_vector_store, get_collection_stats
+from reranker import get_compression_retriever
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,53 @@ def build_retriever(
         f"Retriever built: search_type={search_type}, search_kwargs={search_kwargs}"
     )
     return retriever
+
+
+def build_rerank_retriever(
+    persist_dir: str = "./data/chroma",
+    search_type: str = "similarity",
+    top_k: int = 20,
+    top_n: int = 5,
+    model: str = "qwen3-vl-rerank",
+    search_kwargs: Optional[Dict[str, Any]] = None,
+) -> BaseRetriever:
+    """
+    构建带重排序的检索器。
+
+    工作流程：
+        1. 向量检索器先从 Chroma 中召回 top_k 个文档
+        2. DashScope Reranker 对这 top_k 个文档重新打分
+        3. 返回得分最高的 top_n 个文档
+
+    Args:
+        persist_dir: 向量库持久化目录。
+        search_type: 搜索类型，"similarity" 或 "mmr"。
+        top_k: 初步检索数量（给 rerank 更大的候选池）。
+        top_n: 最终返回的文档数量。
+        model: 重排序模型名称。
+        search_kwargs: 额外的搜索参数。
+
+    Returns:
+        带重排序能力的 ContextualCompressionRetriever 实例。
+    """
+    if search_kwargs is None:
+        search_kwargs = {"k": top_k}
+    else:
+        search_kwargs = {**search_kwargs, "k": top_k}
+
+    vectordb = load_vector_store(persist_dir)
+    base_retriever = vectordb.as_retriever(
+        search_type=search_type,
+        search_kwargs=search_kwargs
+    )
+    compression_retriever = get_compression_retriever(
+        base_retriever, model=model, top_n=top_n
+    )
+    logger.info(
+        f"Rerank retriever built: search_type={search_type}, top_k={top_k}, "
+        f"top_n={top_n}, model={model}"
+    )
+    return compression_retriever
 
 
 class RetrievalEngine:
