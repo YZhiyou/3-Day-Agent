@@ -247,6 +247,19 @@ if user_input:
                         st.session_state["execution_plan"] = None
                         plan_card.empty()
 
+                    elif node_name == "error_handler":
+                        if state_update.get("pending_clarification"):
+                            loading_placeholder.info("🤔 我不太确定你的意思，让我确认一下...")
+                            # 有追问时清空计划卡片（本次不会执行计划）
+                            current_plan = None
+                            current_step_results = []
+                            current_step_index = 0
+                            st.session_state["execution_plan"] = None
+                            plan_card.empty()
+
+                    elif node_name == "generate_clarification":
+                        loading_placeholder.info("💬 正在向你确认...")
+
                     elif node_name in ("react_agent", "summarize_results"):
                         loading_placeholder.info("📝 正在生成回答...")
 

@@ -7,6 +7,7 @@ from langchain.chat_models import init_chat_model
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.sqlite import SqliteSaver
+from error_handler import create_error_handler_node
 import json
 import os
 import sqlite3
@@ -55,6 +56,11 @@ class AgentState(TypedDict):
     replan_count: int
     conversation_summary: Optional[str]
     summary_covered_rounds: int
+    # 容错相关字段
+    pending_clarification: Optional[str]
+    error_log: List[dict]
+    last_slots: dict
+    confidence: Optional[float]
 
 
 # ---------------- 记忆管理配置 ----------------
@@ -239,6 +245,7 @@ def _manage_memory(state: AgentState, llm) -> dict:
     return {
         "conversation_summary": response.content,
         "summary_covered_rounds": new_covered,
+        "pending_clarification": None,  # 用户发新消息，清除上一次的澄清状态
     }
 
 
@@ -508,6 +515,16 @@ def _fallback_to_react(state: AgentState, config, react_agent) -> dict:
     return result
 
 
+# ---------------- 澄清消息生成节点 ----------------
+
+def _generate_clarification(state: AgentState) -> dict:
+    """当 error_handler 判定需要追问时，生成 AIMessage 并返回给用户。"""
+    clarification = state.get("pending_clarification", "")
+    if not clarification:
+        clarification = "抱歉，我没太明白你的意思，你能再具体说一下吗？"
+    return {"messages": [AIMessage(content=clarification)]}
+
+
 # ---------------- 条件路由 ----------------
 
 def _route_by_complexity(state: AgentState) -> str:
@@ -528,6 +545,13 @@ def _route_after_check(state: AgentState) -> str:
     if plan and current >= len(plan.steps):
         return "summarize_results"
     return "execute_step"
+
+
+def _route_after_error_handler(state: AgentState) -> str:
+    """容错节点之后：需要澄清则直接返回追问，否则进入复杂度判断。"""
+    if state.get("pending_clarification"):
+        return "generate_clarification"
+    return "classify_complexity"
 
 
 # ---------------- 对外接口 ----------------
@@ -605,8 +629,13 @@ def create_agent(
     # 构建 Plan-Act 外层图
     builder = StateGraph(AgentState)
 
+    # 容错节点
+    error_handler = create_error_handler_node(llm)
+
     builder.add_node("manage_memory", lambda state: _manage_memory(state, llm))
     builder.add_node("classify_complexity", lambda state: _classify_complexity(state, llm, tools))
+    builder.add_node("error_handler", error_handler)
+    builder.add_node("generate_clarification", _generate_clarification)
     builder.add_node("react_agent", react_agent)
     builder.add_node("generate_plan", lambda state: _generate_plan(state, llm, tools))
     builder.add_node("execute_step", lambda state: _execute_step(state, tools))
@@ -615,7 +644,9 @@ def create_agent(
     builder.add_node("fallback_to_react", lambda state, config: _fallback_to_react(state, config, react_agent))
 
     builder.set_entry_point("manage_memory")
-    builder.add_edge("manage_memory", "classify_complexity")
+    builder.add_edge("manage_memory", "error_handler")
+    builder.add_conditional_edges("error_handler", _route_after_error_handler)
+    builder.add_edge("generate_clarification", END)
     builder.add_conditional_edges("classify_complexity", _route_by_complexity)
     builder.add_edge("react_agent", END)
     builder.add_edge("generate_plan", "execute_step")
