@@ -70,6 +70,29 @@ def _get_last_user_content(messages: list) -> str:
     return ""
 
 
+def _build_dialogue_history(messages: list) -> str:
+    """将消息列表格式化为对话历史文本。"""
+    lines = []
+    for msg in messages:
+        if isinstance(msg, dict):
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "user":
+                lines.append(f"用户：{content}")
+            elif role == "assistant":
+                lines.append(f"助手：{content}")
+        elif isinstance(msg, HumanMessage):
+            lines.append(f"用户：{msg.content}")
+        elif isinstance(msg, AIMessage):
+            lines.append(f"助手：{msg.content}")
+        elif hasattr(msg, "type"):
+            if msg.type == "human":
+                lines.append(f"用户：{msg.content}")
+            elif msg.type == "ai":
+                lines.append(f"助手：{msg.content}")
+    return "\n".join(lines)
+
+
 def _build_tool_descriptions(tools: List[BaseTool]) -> str:
     """生成工具描述文本。"""
     lines = []
@@ -104,11 +127,13 @@ def _build_react_agent(
 
 def _classify_complexity(state: AgentState, llm, tools: List[BaseTool]) -> dict:
     """判断用户请求的复杂度（使用 PydanticOutputParser）。"""
-    user_content = _get_last_user_content(state["messages"])
+    messages = state["messages"]
+    user_content = _get_last_user_content(messages)
     if not user_content:
         return {"is_complex": False}
 
     tool_desc = _build_tool_descriptions(tools)
+    dialogue_history = _build_dialogue_history(messages)
     parser = PydanticOutputParser(pydantic_object=ComplexityJudgment)
 
     prompt = f"""你是一个任务复杂度判断助手。请分析用户的请求，判断它是否需要复杂的计划-执行流程。
@@ -120,7 +145,10 @@ def _classify_complexity(state: AgentState, llm, tools: List[BaseTool]) -> dict:
 - 复杂任务：需要调用 ≥2 个不同工具，或需要多步依赖（某一步的输出是下一步的输入），或涉及多个子任务
 - 简单任务：简单闲聊、单次检索、仅读/写用户信息、打招呼、简单问答
 
-用户请求：{user_content}
+对话历史：
+{dialogue_history}
+
+用户当前请求：{user_content}
 
 {parser.get_format_instructions()}"""
 
@@ -134,8 +162,10 @@ def _classify_complexity(state: AgentState, llm, tools: List[BaseTool]) -> dict:
 
 def _generate_plan(state: AgentState, llm, tools: List[BaseTool]) -> dict:
     """为复杂任务生成执行计划（使用 PydanticOutputParser）。"""
-    user_content = _get_last_user_content(state["messages"])
+    messages = state["messages"]
+    user_content = _get_last_user_content(messages)
     tool_desc = _build_tool_descriptions(tools)
+    dialogue_history = _build_dialogue_history(messages)
     parser = PydanticOutputParser(pydantic_object=Plan)
 
     prompt = f"""你是一个任务规划助手。请根据用户请求制定一个详细的执行计划。
@@ -150,7 +180,10 @@ def _generate_plan(state: AgentState, llm, tools: List[BaseTool]) -> dict:
 4. 步骤之间可以有依赖关系
 5. 如果任务无法完成，也要给出计划并说明限制
 
-用户请求：{user_content}
+对话历史：
+{dialogue_history}
+
+用户当前请求：{user_content}
 
 {parser.get_format_instructions()}"""
 
@@ -317,11 +350,14 @@ def _summarize_results(state: AgentState, llm) -> dict:
         for r in step_results
     ])
 
-    prompt = f"""根据以下执行结果，生成对用户请求的完整回答。
+    dialogue_history = _build_dialogue_history(messages)
 
-用户原始请求：{user_content}
+    prompt = f"""根据以下执行结果和对话历史，生成对用户请求的完整回答。
 
-执行计划目标：{plan.overall_goal if plan else ''}
+对话历史：
+{dialogue_history}
+
+当前执行计划目标：{plan.overall_goal if plan else ''}
 
 执行结果：
 {outputs}

@@ -173,6 +173,7 @@ Agent 的系统提示词中内置了决策优先级：
 | 2026-04-26 | **混合检索（Hybrid Search）升级**：在语义检索基础上叠加 BM25 关键词通道。检索流程：语义粗筛 top-20 → BM25 关键词精排 top-5（自定义中文分词器）→ RRF 倒数排名融合 → DashScope Rerank 最终精排 top-5。新增 `HybridRetriever` 类与 `build_hybrid_rerank_retriever()`，安装 `rank-bm25` 依赖；若依赖缺失自动降级为纯语义检索。 |
 | 2026-04-26 | **Parent-Child 分块策略升级**：引入 `ParentDocumentRetriever`，父块经 `_smart_split_documents()` 智能分块（chunk_size=1000）后，由子块分割器（chunk_size=300）细分为嵌入单元。子块存入 Chroma 负责向量检索，父块存入 `JsonDocstore`（JSON 文件持久化）保障完整上下文返回。检索 pipeline 升级为：子块语义检索 → 返回父块 → BM25 关键词精排 → RRF 融合 → DashScope Rerank 精排。`kb_manager.py` 的重建、增删已全面适配 Parent-Child 模式，向后兼容旧版纯向量库。 |
 | 2026-04-26 | 解决了LaTex公式渲染问题。 |
+| 2026-04-26 | 解决了Plan-Act模式下记忆丢失问题，以及简单模式下非流式输出问题。 |
 
 ---
 

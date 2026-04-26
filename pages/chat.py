@@ -180,9 +180,15 @@ if user_input:
         for chunk in st.session_state.agent.stream(
             {"messages": [{"role": "user", "content": user_input}]},
             {"configurable": {"thread_id": st.session_state.session_id}},
-            stream_mode=["messages", "updates"]
+            stream_mode=["messages", "updates"],
+            subgraphs=True
         ):
-            mode, payload = chunk
+            # subgraphs=True 时格式为 (path, mode, payload)，否则为 (mode, payload)
+            if len(chunk) == 3:
+                path, mode, payload = chunk
+            else:
+                mode, payload = chunk
+                path = ()
 
             if mode == "messages":
                 msg, metadata = payload
@@ -190,7 +196,8 @@ if user_input:
                     response_buffer += msg.content
                     message_placeholder.markdown(_preprocess_latex(response_buffer))
 
-            elif mode == "updates":
+            elif mode == "updates" and path == ():
+                # 只处理外层图的节点状态更新（子图内部更新不展示）
                 for node_name, state_update in payload.items():
                     if node_name == "classify_complexity":
                         if state_update.get("is_complex"):
