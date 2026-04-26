@@ -153,4 +153,19 @@ Agent 的系统提示词中内置了决策优先级：
 
 ---
 
+## 更新记录
+
+| 时间 | 更新内容 |
+|------|---------|
+| 2025-04-26 | 联网搜索工具从 DuckDuckGo 迁移至 **Tavily**，搜索结果更精准、更稳定。 |
+| 2025-04-26 | 历史会话列表支持**自动摘要标题**（取首条消息前 12 字），且按创建时间**倒序排列**（最新在最上）。 |
+| 2026-04-26 | **Markdown 论文专用分块策略**：针对 `.md` 文件启用标题感知（`# / ## / ###`）+ 原子单元保护，代码块、LaTeX 公式（`$...$` / `$$...$$`）、表格不再被拦腰切断，chunk 元数据自动携带章节路径。 |
+| 2026-04-26 | **`create_vector_store` 增强**：新增 `batch_size`（默认 10，避免 Embedding API 超时）与 `progress_callback`（支持分阶段进度回调：split / create / embed），大批量论文入库时可实时感知进度。 |
+| 2026-04-26 | **知识库重建健壮性增强（Windows 适配）**：修复重建时 `WinError 32` 文件锁问题，改为"逻辑清空 collection + 复用目录"策略；释放 `session_state` 全引用链（`vectordb`/`retriever`/`agent`）并 `del` 局部变量，确保 Windows 内核释放 mmap 锁。 |
+| 2026-04-26 | **嵌入请求防崩溃**：每批 `add_documents` 增加 3 次指数退避重试（2s / 4s），应对 `IncompleteRead` / `SSLEOFError` / `Connection broken` 等网络抖动；添加 `_clean_text()` 自动过滤 PDF 提取的 Unicode surrogate 字符（`0xD800-0xDFFF`），根治 `UnicodeEncodeError: surrogates not allowed`。 |
+| 2026-04-26 | **重建进度可视化**：`pages/kb.py` 引入 `st.status` + `st.progress` 总体进度条，分阶段权重映射（扫描 5% → 加载 25% → 清空 10% → 分割 10% → 初始化 5% → 嵌入 45%），实时显示当前处理文件名与嵌入批次。 |
+| 2026-04-26 | **Streamlit 弃用参数修复**：全部 13 处 `use_container_width=True` 替换为 `width='stretch'`，消除新版本警告。 |
+
+---
+
 **项目相关请见 code-readme.md**

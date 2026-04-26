@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from dotenv import load_dotenv
 
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Tuple, Optional, Dict, Any, Callable
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
 from langchain_community.embeddings import DashScopeEmbeddings
@@ -17,6 +17,18 @@ logger = logging.getLogger(__name__)
 def _get_embeddings() -> DashScopeEmbeddings:
     """统一初始化 DashScope 嵌入模型。"""
     return DashScopeEmbeddings(model="text-embedding-v4")
+
+
+def _clean_text(text: str) -> str:
+    """
+    清理文本中的非法 Unicode surrogate 字符（0xD800 - 0xDFFF 范围）。
+
+    PDF 提取或某些编码转换可能产生 surrogate 字符，这些字符在 UTF-8 编码中不合法，
+    会导致 DashScope API 请求触发 UnicodeEncodeError。
+    """
+    if not text:
+        return text
+    return "".join(c for c in text if not (0xD800 <= ord(c) <= 0xDFFF))
 
 
 # ---------- Markdown 论文专用保护性分块 ----------
@@ -243,7 +255,9 @@ def create_vector_store(
     documents: List[Document],
     persist_dir: str = "./data/chroma",
     chunk_size: int = 1000,
-    chunk_overlap: int = 200
+    chunk_overlap: int = 200,
+    batch_size: int = 10,
+    progress_callback: Optional[Callable[[str, int, int, str], None]] = None,
 ) -> Chroma:
     """
     从原始文档创建 Chroma 向量存储并持久化。
@@ -253,12 +267,20 @@ def create_vector_store(
         persist_dir: 持久化目录路径。
         chunk_size: 分块大小。
         chunk_overlap: 分块重叠大小。
+        batch_size: 每批嵌入的文档块数量，避免一次性请求过多导致 API 超时。
+        progress_callback: 进度回调函数，签名 (stage, current, total, message)。
 
     Returns:
         构建完成的 Chroma 向量存储实例。
     """
     # 1. 分割文档（自动按文件类型路由最佳策略）
+    if progress_callback:
+        progress_callback("split", 0, 1, "正在分割文档...")
+
     split_docs = _smart_split_documents(documents, chunk_size, chunk_overlap)
+
+    if progress_callback:
+        progress_callback("split", 1, 1, f"文档已分割为 {len(split_docs)} 个块")
 
     # 2. 初始化嵌入模型
     embeddings = _get_embeddings()
@@ -266,13 +288,56 @@ def create_vector_store(
     # 3. 确保持久化目录存在
     Path(persist_dir).parent.mkdir(parents=True, exist_ok=True)
 
-    # 4. 构建 Chroma 向量库并持久化
-    vectordb = Chroma.from_documents(
-        documents=split_docs,
-        embedding=embeddings,
-        persist_directory=persist_dir
+    # 4. 创建空 Chroma 实例（复用已有目录或新建）
+    if progress_callback:
+        progress_callback("create", 0, 1, "正在初始化向量库...")
+
+    vectordb = Chroma(
+        persist_directory=persist_dir,
+        embedding_function=embeddings,
     )
-    logger.info(f"Vector store created and persisted to '{persist_dir}'.")
+
+    if progress_callback:
+        progress_callback("create", 1, 1, "向量库初始化完成")
+
+    # 5. 分批添加文档，避免单次嵌入请求过大导致 API 超时
+    total = len(split_docs)
+    for i in range(0, total, batch_size):
+        batch = split_docs[i : i + batch_size]
+        # 清理非法 Unicode surrogate 字符（常见于 PDF 提取的数学符号）
+        for doc in batch:
+            doc.page_content = _clean_text(doc.page_content)
+
+        # 对每批增加重试，应对偶发的网络中断（IncompleteRead / Connection broken）
+        for attempt in range(3):
+            try:
+                vectordb.add_documents(batch)
+                break
+            except Exception as exc:
+                if attempt < 2:
+                    wait = 2 ** (attempt + 1)  # 2s, 4s
+                    logger.warning(
+                        f"嵌入批次失败（{i + 1}-{min(i + batch_size, total)}），"
+                        f"{wait}s 后第 {attempt + 2} 次重试: {exc}"
+                    )
+                    import time
+                    time.sleep(wait)
+                else:
+                    logger.error(
+                        f"嵌入批次最终失败（{i + 1}-{min(i + batch_size, total)}）: {exc}"
+                    )
+                    raise
+        if progress_callback:
+            progress_callback(
+                "embed",
+                min(i + batch_size, total),
+                total,
+                f"正在嵌入文档块... ({min(i + batch_size, total)}/{total})",
+            )
+
+    logger.info(
+        f"Vector store created and persisted to '{persist_dir}' with {total} chunks."
+    )
     return vectordb
 
 

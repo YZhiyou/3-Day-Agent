@@ -21,7 +21,7 @@ if not st.session_state.get("user_id"):
     st.switch_page("streamlit_app.py")
 
 # 侧边栏
-if st.sidebar.button("⬅️ 返回聊天", use_container_width=True):
+if st.sidebar.button("⬅️ 返回聊天", width='stretch'):
     st.switch_page("pages/chat.py")
 
 st.title("📜 历史对话")

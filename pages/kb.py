@@ -24,7 +24,7 @@ if not st.session_state.get("user_id"):
     st.switch_page("streamlit_app.py")
 
 # 侧边栏
-if st.sidebar.button("⬅️ 返回聊天", use_container_width=True):
+if st.sidebar.button("⬅️ 返回聊天", width='stretch'):
     st.switch_page("pages/chat.py")
 
 st.title("📚 知识库管理")
@@ -53,7 +53,7 @@ with tab_files:
 
         if sources:
             data = [{"来源": s, "类型": t} for s, t in sorted(sources.items())]
-            st.dataframe(data, use_container_width=True)
+            st.dataframe(data, width='stretch')
 
             st.divider()
             st.subheader("删除文件")
@@ -108,27 +108,24 @@ with tab_rebuild:
     confirm = st.checkbox("我确认要重建知识库")
     if st.button("重建", key="btn_rebuild"):
         if confirm:
+            progress_bar = st.progress(0.0, text="准备重建...")
             try:
-                with st.spinner("正在重建知识库..."):
+                with st.status("正在重建知识库...", expanded=True) as status:
                     # 1. 彻底释放旧向量库的文件句柄
-                    # 先切断 session_state 中所有可能间接引用 vectordb 的对象
                     old_vectordb = st.session_state.pop("vectordb", None)
                     st.session_state.pop("retriever", None)
                     st.session_state.pop("agent", None)
 
                     if old_vectordb:
                         try:
-                            # 关闭 chromadb 底层 PersistentClient
                             if hasattr(old_vectordb, "_client") and hasattr(old_vectordb._client, "close"):
                                 old_vectordb._client.close()
-                            # 释放 collection 引用（可能持有 mmap）
                             if hasattr(old_vectordb, "_collection"):
                                 old_vectordb._collection = None
                         except Exception:
                             pass
                         del old_vectordb
 
-                    # 删除本页面顶部创建的局部变量引用，避免阻止 GC
                     try:
                         del vectordb
                     except NameError:
@@ -138,17 +135,42 @@ with tab_rebuild:
                     gc.collect()
                     gc.collect()
                     import time
-                    time.sleep(2.0)  # Windows 释放文件锁需要更长时间
+                    time.sleep(2.0)
 
-                    new_vectordb = rebuild_kb("./data/chroma", docs_dir)
+                    # 进度跟踪器：将各阶段进度映射到总体进度条
+                    class _ProgressTracker:
+                        def __init__(self, bar_placeholder):
+                            self.bar = bar_placeholder
+                            self.weights = {
+                                "scan":  (0.00, 0.05),
+                                "load":  (0.05, 0.30),
+                                "clear": (0.30, 0.40),
+                                "split": (0.40, 0.50),
+                                "create":(0.50, 0.55),
+                                "embed": (0.55, 1.00),
+                            }
+
+                        def __call__(self, stage, current, total, message):
+                            start, end = self.weights.get(stage, (0.0, 1.0))
+                            ratio = current / total if total > 0 else 1.0
+                            overall = start + (end - start) * ratio
+                            self.bar.progress(overall, text=message)
+
+                    tracker = _ProgressTracker(progress_bar)
+                    new_vectordb = rebuild_kb(
+                        "./data/chroma", docs_dir, progress_callback=tracker
+                    )
                     new_retriever = build_retriever()
                     new_tools = create_tools(st.session_state.user_id, new_retriever)
                     new_agent = create_agent(new_tools)
                     st.session_state.vectordb = new_vectordb
                     st.session_state.retriever = new_retriever
                     st.session_state.agent = new_agent
-                st.success("知识库重建成功！")
+
+                    progress_bar.empty()
+                    status.update(label="知识库重建成功！", state="complete", expanded=False)
             except Exception as e:
+                progress_bar.empty()
                 st.error(f"重建失败: {e}")
         else:
             st.error("请先勾选确认框以确认重建操作。")

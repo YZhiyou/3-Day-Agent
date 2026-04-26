@@ -21,7 +21,7 @@ if st.session_state.get("user_id") != "admin":
     st.switch_page("pages/chat.py")
 
 # 侧边栏
-if st.sidebar.button("⬅️ 返回聊天", use_container_width=True):
+if st.sidebar.button("⬅️ 返回聊天", width='stretch'):
     st.switch_page("pages/chat.py")
 
 st.title("🔧 管理员控制台")
@@ -53,7 +53,7 @@ else:
 st.subheader("会话列表")
 sessions = _load_sessions(selected_user)
 if sessions:
-    st.dataframe(sessions, use_container_width=True)
+    st.dataframe(sessions, width='stretch')
 else:
     st.info("该用户暂无会话")
 

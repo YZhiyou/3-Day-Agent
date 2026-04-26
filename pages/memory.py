@@ -19,7 +19,7 @@ if not st.session_state.get("user_id"):
     st.switch_page("streamlit_app.py")
 
 # 侧边栏
-if st.sidebar.button("⬅️ 返回聊天", use_container_width=True):
+if st.sidebar.button("⬅️ 返回聊天", width='stretch'):
     st.switch_page("pages/chat.py")
 
 st.title("🧠 长期记忆")
@@ -33,7 +33,7 @@ records = [{"键": k, "值": v} for k, v in data.items()]
 st.subheader("编辑记忆")
 edited = st.data_editor(
     records,
-    use_container_width=True,
+    width='stretch',
     num_rows="dynamic",
     key="memory_editor"
 )

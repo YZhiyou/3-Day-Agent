@@ -1,7 +1,7 @@
 import os
 import shutil
 import logging
-from typing import List
+from typing import List, Optional, Callable
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
@@ -82,13 +82,18 @@ def delete_file_from_kb(vectordb: Chroma, file_path: str) -> str:
         return f"删除失败: {e}"
 
 
-def rebuild_kb(persist_dir: str, docs_directory: str) -> Chroma:
+def rebuild_kb(
+    persist_dir: str,
+    docs_directory: str,
+    progress_callback: Optional[Callable[[str, int, int, str], None]] = None,
+) -> Chroma:
     """
     重建知识库：清空旧向量库，重新加载指定目录下的所有文档。
 
     Args:
         persist_dir: 向量库持久化目录。
         docs_directory: 文档源目录。
+        progress_callback: 进度回调函数，签名 (stage, current, total, message)。
 
     Returns:
         新创建的 Chroma 向量库实例。
@@ -102,13 +107,45 @@ def rebuild_kb(persist_dir: str, docs_directory: str) -> Chroma:
     if not os.path.exists(docs_directory):
         raise FileNotFoundError(f"文档目录不存在: {docs_directory}")
 
-    docs = load_documents(docs_directory)
-    if not docs:
+    # 扫描待处理文件
+    all_files = []
+    for root, _, files in os.walk(docs_directory):
+        for file in files:
+            ext = os.path.splitext(file)[1].lower()
+            if ext in SUPPORTED_EXT:
+                all_files.append(os.path.join(root, file))
+
+    if progress_callback:
+        progress_callback(
+            "scan", len(all_files), len(all_files), f"发现 {len(all_files)} 个待处理文件"
+        )
+
+    # 逐个加载文件，避免一次性加载过多大文件导致内存溢出
+    all_docs: List[Document] = []
+    for idx, file_path in enumerate(all_files):
+        try:
+            docs = _load_single_file(file_path)
+            all_docs.extend(docs)
+        except Exception as e:
+            logger.warning(f"加载文件失败: {file_path}, 错误: {e}")
+
+        if progress_callback:
+            progress_callback(
+                "load",
+                idx + 1,
+                len(all_files),
+                f"正在加载文件 ({idx + 1}/{len(all_files)}): {os.path.basename(file_path)}",
+            )
+
+    if not all_docs:
         logger.warning(f"在 {docs_directory} 中未找到任何支持的文档。")
 
     # Windows 上 HNSW 索引文件（data_level0.bin）的 mmap 锁非常顽固，
     # 物理删除目录经常失败。因此采用"复用目录 + 逻辑清空 collection"策略。
     if os.path.exists(persist_dir):
+        if progress_callback:
+            progress_callback("clear", 0, 1, "正在清空旧向量数据...")
+
         try:
             existing_db = load_vector_store(persist_dir)
             # 优先尝试直接删除整个 collection（释放 HNSW 索引文件最彻底）
@@ -146,7 +183,15 @@ def rebuild_kb(persist_dir: str, docs_directory: str) -> Chroma:
                             f"请尝试重启 Streamlit 应用后再重建。原始错误: {exc}"
                         ) from exc
 
-    vectordb = create_vector_store(docs, persist_dir=persist_dir)
+        if progress_callback:
+            progress_callback("clear", 1, 1, "旧向量数据已清空")
+
+    # 创建新向量库（内部采用分批嵌入，避免 API 超时）
+    vectordb = create_vector_store(
+        all_docs,
+        persist_dir=persist_dir,
+        progress_callback=progress_callback,
+    )
     logger.info(f"知识库重建完成，持久化到: {persist_dir}")
     return vectordb
 

@@ -29,30 +29,30 @@ user_id = st.session_state.user_id
 st.sidebar.markdown(f"**当前用户：** `{user_id}`")
 st.sidebar.divider()
 
-if st.sidebar.button("🆕 新对话", use_container_width=True):
+if st.sidebar.button("🆕 新对话", width='stretch'):
     st.session_state.session_id = str(uuid.uuid4())[:8]
     _record_session(user_id, st.session_state.session_id)
     tools = create_tools(user_id, st.session_state.retriever, enable_web_search=True)
     st.session_state.agent = create_agent(tools)
     st.rerun()
 
-if st.sidebar.button("📚 知识库", use_container_width=True):
+if st.sidebar.button("📚 知识库", width='stretch'):
     st.switch_page("pages/kb.py")
 
-if st.sidebar.button("🧠 长期记忆", use_container_width=True):
+if st.sidebar.button("🧠 长期记忆", width='stretch'):
     st.switch_page("pages/memory.py")
 
-if st.sidebar.button("📜 历史对话", use_container_width=True):
+if st.sidebar.button("📜 历史对话", width='stretch'):
     st.switch_page("pages/history.py")
 
 # 仅管理员可见
 if user_id == "admin":
-    if st.sidebar.button("🔧 管理员", use_container_width=True):
+    if st.sidebar.button("🔧 管理员", width='stretch'):
         st.switch_page("pages/admin.py")
 
 st.sidebar.divider()
 
-if st.sidebar.button("🚪 退出登录", use_container_width=True):
+if st.sidebar.button("🚪 退出登录", width='stretch'):
     for key in ["user_id", "session_id", "agent", "vectordb", "retriever"]:
         st.session_state[key] = None
     st.switch_page("streamlit_app.py")
