@@ -218,34 +218,59 @@ WebUI 采用 Streamlit 多页面架构，入口为 `streamlit_app.py`。
 原始文档 (List[Document])
     │
     ▼
-RecursiveCharacterTextSplitter（中文友好分隔符）
+┌──────────────────────────────────────────┐
+│  _smart_split_documents()                │
+│  ├── Markdown (.md)                      │
+│  │   └── MarkdownHeaderTextSplitter      │
+│  │       （按 # / ## / ### 标题层级分割） │
+│  │       └── 仍过长？                     │
+│  │           └── 原子单元保护性二次分割   │
+│  │               （代码块/公式/表格不切断）│
+│  │                                        │
+│  └── PDF / TXT                           │
+│      └── RecursiveCharacterTextSplitter  │
+│          （中文友好分隔符）                │
+└──────────────────────────────────────────┘
     │
     ▼
 文档块 (List[Document])
     │
     ▼
-DashScopeEmbeddings(text-embedding-v4)
+┌──────────────────────────────────────────┐
+│  分批嵌入（batch_size=10）                │
+│  ├── 每批 _clean_text() 过滤 surrogate   │
+│  └── 失败则指数退避重试（2s → 4s）        │
+└──────────────────────────────────────────┘
     │
     ▼
-Chroma.from_documents() ──▶ 持久化到 ./data/chroma
+Chroma.add_documents() ──▶ 持久化到 ./data/chroma
 ```
 
 **关键设计决策**：
 
-- **中文友好的分块策略**：`RecursiveCharacterTextSplitter` 的分隔符序列按 `\n\n` → `\n` → `。` → `！` → `？` → `；` → ` ` → `""` 优先级递归切分。这保证中文段落优先在句末断点分割，避免把一个完整的语义句子拦腰截断。
+- **文件类型感知路由**：`_smart_split_documents()` 根据 `metadata["file_type"]` 自动选择分块策略。PDF / TXT 沿用原有的 `RecursiveCharacterTextSplitter`；Markdown 论文走专用 pipeline。
+- **Markdown 双层分块（标题感知 + 原子保护）**：
+  - **一级**：`MarkdownHeaderTextSplitter` 按 `# / ## / ### / ####` 分割，每个 chunk 的 metadata 自动携带 `Header 1/2/3/4` 路径，RAG 检索时模型能感知章节归属。
+  - **二级**：对仍超过 `chunk_size` 的章节，启用**原子单元保护性分割**。文本被拆解为"普通文本"和"保护块"两类原子单元：代码块（`` ```...``` ``）、块级公式（`$$...$$`）、行内公式（`$...$`）、Markdown 表格被视为不可分割单元，分块时优先在普通文本处切断，尽量避免破坏上述结构。
+- **中文友好的通用分块**：非 Markdown 文档沿用 `RecursiveCharacterTextSplitter`，分隔符序列按 `\n\n` → `\n` → `。` → `！` → `？` → `；` → ` ` → `""` 优先级递归切分，中文段落优先在句末断点分割。
 - **chunk_size=1000, chunk_overlap=200**：在信息密度和检索粒度之间取平衡。1000 字符足以容纳一个完整的论证段落；200 字符重叠确保跨块边界的关键信息不会丢失。
 - **DashScope `text-embedding-v4`**：选用灵积平台的 Embedding 模型，对中文语义理解效果稳定，且 API 调用成本可控。
+- **分批嵌入与指数退避重试**：`create_vector_store` 不再一次性提交全部文档，而是按 `batch_size=10` 分批调用 `vectordb.add_documents()`。每批失败时自动重试最多 3 次，等待时间按指数退避（2s → 4s），有效应对 `IncompleteRead` / `SSLEOFError` / `Connection broken` 等网络抖动。
+- **Unicode surrogate 字符过滤**：PDF 提取的数学符号或编码转换可能产生 `0xD800-0xDFFF` 范围的非法 surrogate 字符，导致 DashScope API 触发 `UnicodeEncodeError`。`_clean_text()` 在每批嵌入前自动过滤这些字符，根治此类崩溃。
+- **进度回调支持**：`create_vector_store` 支持传入 `progress_callback(stage, current, total, message)`，外部 UI（如 Streamlit）可分阶段（split / create / embed）实时展示大批量论文入库进度。
 - **增量添加与删除**：`add_documents` 和 `delete_documents` 支持在已有向量库上增删，无需每次都全量重建。
 
 **对外接口**：
 
 | 函数 | 作用 |
 |------|------|
-| `create_vector_store(docs)` | 从原始文档创建并持久化新的向量库 |
+| `create_vector_store(docs, persist_dir, chunk_size, chunk_overlap, batch_size, progress_callback)` | 从原始文档创建并持久化新的向量库；支持分批嵌入与进度回调 |
 | `load_vector_store(persist_dir)` | 加载已持久化的向量库 |
-| `add_documents(vectordb, docs)` | 向现有向量库增量添加文档 |
+| `add_documents(vectordb, docs)` | 向现有向量库增量添加文档（自动按文件类型路由最佳分块策略） |
 | `delete_documents(vectordb, ids/filter)` | 按 ID 或元数据过滤条件删除文档 |
 | `get_collection_stats(vectordb)` | 获取集合名称、文档数量等统计信息 |
+| `split_markdown_documents(docs, chunk_size, chunk_overlap)` | Markdown 专用分块：标题感知 + 原子单元保护 |
+| `split_documents(docs, chunk_size, chunk_overlap)` | 通用中文友好分块（适用于 PDF / TXT） |
 
 ---
 
