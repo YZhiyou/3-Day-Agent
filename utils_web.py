@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime
 from typing import List, Dict, Any
@@ -105,6 +106,25 @@ def _delete_session_record(user_id: str, session_id: str) -> None:
         except Exception:
             # 忽略数据库清理错误（如表不存在）
             pass
+
+
+def _preprocess_latex(text: str) -> str:
+    """
+    将 LLM 常用的 LaTeX 定界符转换为 Streamlit/KaTeX 支持的格式。
+    支持：
+    - 块级公式：\\[ ... \\]  → $$ ... $$
+    - 行内公式：\\( ... \\)  → $ ... $
+    """
+    if not isinstance(text, str):
+        return text
+
+    # 块级公式：匹配 \[ ... \]（支持多行，非贪婪）
+    text = re.sub(r'\\\[([\s\S]*?)\\\]', r'$$\1$$', text)
+
+    # 行内公式：匹配 \( ... \)（支持多行，非贪婪）
+    text = re.sub(r'\\\(([\s\S]*?)\\\)', r'$\1$', text)
+
+    return text
 
 
 def _load_chat_history(agent, session_id: str) -> List[Dict[str, str]]:

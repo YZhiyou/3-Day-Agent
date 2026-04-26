@@ -170,6 +170,7 @@ Agent 的系统提示词中内置了决策优先级：
 | 2026-04-26 | **Streamlit 弃用参数修复**：全部 13 处 `use_container_width=True` 替换为 `width='stretch'`，消除新版本警告。 |
 | 2026-04-26 | **RAG 检索精度增强（Rerank）**：集成阿里云 DashScope `qwen3-vl-rerank` 重排序模型。初步检索召回 top-20，经语义重排序后返回最相关的 top-5；新增 `reranker.py` 模块与 `build_rerank_retriever()` 工厂函数，CLI 与 Streamlit 双入口均已切换，原 `build_retriever()` 保留以实现向后兼容。 |
 | 2026-04-26 | **混合检索（Hybrid Search）升级**：在语义检索基础上叠加 BM25 关键词通道。检索流程：语义粗筛 top-20 → BM25 关键词精排 top-5（自定义中文分词器）→ RRF 倒数排名融合 → DashScope Rerank 最终精排 top-5。新增 `HybridRetriever` 类与 `build_hybrid_rerank_retriever()`，安装 `rank-bm25` 依赖；若依赖缺失自动降级为纯语义检索。 |
+| 2026-04-26 | 解决了LaTex公式渲染问题。 |
 
 ---
 

@@ -10,6 +10,7 @@ from vector_store import get_collection_stats
 from retriever import build_retriever
 from tools import create_tools
 from agent import create_agent
+from utils_web import _preprocess_latex
 
 st.set_page_config(page_title="知识库", layout="wide")
 
@@ -79,7 +80,7 @@ with tab_search:
     query = st.text_input("搜索关键词", placeholder="输入关键词搜索知识库...")
     if st.button("搜索", key="btn_search") and query:
         result = search_kb(vectordb, query)
-        st.markdown(result)
+        st.markdown(_preprocess_latex(result))
 
 # ---------------- Tab 3: 新增文档 ----------------
 with tab_add:

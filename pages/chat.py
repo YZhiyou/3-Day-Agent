@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from langchain_core.messages import AIMessage, AIMessageChunk
 from agent import create_agent
 from tools import create_tools
-from utils_web import _record_session, _load_chat_history, _update_session_title
+from utils_web import _record_session, _load_chat_history, _update_session_title, _preprocess_latex
 
 st.set_page_config(page_title="聊天", layout="wide")
 
@@ -65,7 +65,7 @@ st.caption(f"当前会话：`{st.session_state.session_id}`")
 history = _load_chat_history(st.session_state.agent, st.session_state.session_id)
 for msg in history:
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+        st.markdown(_preprocess_latex(msg["content"]))
 
 # ---------------- 执行计划卡片渲染 ----------------
 
@@ -188,7 +188,7 @@ if user_input:
                 msg, metadata = payload
                 if isinstance(msg, (AIMessage, AIMessageChunk)) and msg.content:
                     response_buffer += msg.content
-                    message_placeholder.markdown(response_buffer)
+                    message_placeholder.markdown(_preprocess_latex(response_buffer))
 
             elif mode == "updates":
                 for node_name, state_update in payload.items():
