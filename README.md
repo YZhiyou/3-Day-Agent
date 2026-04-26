@@ -174,6 +174,9 @@ Agent 的系统提示词中内置了决策优先级：
 | 2026-04-26 | **Parent-Child 分块策略升级**：引入 `ParentDocumentRetriever`，父块经 `_smart_split_documents()` 智能分块（chunk_size=1000）后，由子块分割器（chunk_size=300）细分为嵌入单元。子块存入 Chroma 负责向量检索，父块存入 `JsonDocstore`（JSON 文件持久化）保障完整上下文返回。检索 pipeline 升级为：子块语义检索 → 返回父块 → BM25 关键词精排 → RRF 融合 → DashScope Rerank 精排。`kb_manager.py` 的重建、增删已全面适配 Parent-Child 模式，向后兼容旧版纯向量库。 |
 | 2026-04-26 | 解决了LaTex公式渲染问题。 |
 | 2026-04-26 | 解决了Plan-Act模式下记忆丢失问题，以及简单模式下非流式输出问题。 |
+| 2026-04-26 | **Plan-Act 短期记忆上下文修复**：`_classify_complexity`、`_generate_plan`、`_summarize_results` 三个节点在调用 LLM 时均注入完整对话历史，Agent 能正确理解代词指代（如"这家公司"→"阿里"）和省略上下文。 |
+| 2026-04-26 | **ReAct Agent 流式输出修复**：`chat.py` 的 `agent.stream()` 增加 `subgraphs=True`，外层图能捕获子图（`react_agent`）内部的 `AIMessageChunk` 流式事件，简单模式下回答也能逐字显示。 |
+| 2026-04-26 | **滚动式摘要+窗口记忆模式**：新增 `manage_memory` 节点，当对话轮数达到 20 时触发首次摘要（前 15 轮），之后每新增 15 轮未摘要历史自动合并进摘要；LLM prompt 始终保留最近 5 轮原始消息 + 滚动摘要，兼顾长期记忆与上下文长度控制。新增 `summary_covered_rounds` 状态字段精确追踪摘要覆盖范围。 |
 
 ---
 

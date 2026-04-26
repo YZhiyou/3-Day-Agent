@@ -53,6 +53,15 @@ class AgentState(TypedDict):
     is_complex: Optional[bool]
     final_summary: Optional[str]
     replan_count: int
+    conversation_summary: Optional[str]
+    summary_covered_rounds: int
+
+
+# ---------------- 记忆管理配置 ----------------
+
+MEMORY_WINDOW_LIMIT = 20       # 达到此轮数时触发摘要
+MEMORY_WINDOW_KEEP = 5         # 始终保留最近 N 轮原始消息
+MEMORY_TRIGGER_BATCH = 15      # 每次新增未摘要轮数达到此值时更新摘要
 
 
 # ---------------- 工具函数 ----------------
@@ -70,27 +79,68 @@ def _get_last_user_content(messages: list) -> str:
     return ""
 
 
-def _build_dialogue_history(messages: list) -> str:
-    """将消息列表格式化为对话历史文本。"""
-    lines = []
-    for msg in messages:
-        if isinstance(msg, dict):
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            if role == "user":
-                lines.append(f"用户：{content}")
-            elif role == "assistant":
-                lines.append(f"助手：{content}")
-        elif isinstance(msg, HumanMessage):
-            lines.append(f"用户：{msg.content}")
-        elif isinstance(msg, AIMessage):
-            lines.append(f"助手：{msg.content}")
-        elif hasattr(msg, "type"):
-            if msg.type == "human":
-                lines.append(f"用户：{msg.content}")
-            elif msg.type == "ai":
-                lines.append(f"助手：{msg.content}")
-    return "\n".join(lines)
+def _is_human_message(msg) -> bool:
+    """判断消息是否为用户消息。"""
+    if isinstance(msg, dict):
+        return msg.get("role") == "user"
+    elif isinstance(msg, HumanMessage):
+        return True
+    elif hasattr(msg, "type") and msg.type == "human":
+        return True
+    return False
+
+
+def _format_single_msg(msg) -> str:
+    """将单条消息格式化为对话行文本，非用户/助手消息返回空字符串。"""
+    if isinstance(msg, dict):
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if role == "user":
+            return f"用户：{content}"
+        elif role == "assistant":
+            return f"助手：{content}"
+    elif isinstance(msg, HumanMessage):
+        return f"用户：{msg.content}"
+    elif isinstance(msg, AIMessage):
+        return f"助手：{msg.content}"
+    elif hasattr(msg, "type"):
+        if msg.type == "human":
+            return f"用户：{msg.content}"
+        elif msg.type == "ai":
+            return f"助手：{msg.content}"
+    return ""
+
+
+def _build_dialogue_history(messages: list, summary: Optional[str] = None, summary_covered_rounds: int = 0) -> str:
+    """将消息列表格式化为对话历史文本，支持滚动摘要+窗口截断。"""
+    lines = [_format_single_msg(m) for m in messages]
+    lines = [l for l in lines if l]  # 过滤空行
+
+    if not lines:
+        return ""
+
+    human_count = sum(1 for l in lines if l.startswith("用户："))
+
+    # 没有摘要或摘要未覆盖任何轮数，返回全量
+    if not summary or summary_covered_rounds <= 0:
+        return "\n".join(lines)
+
+    # 保留摘要覆盖范围之后的原始消息
+    rounds_to_keep = human_count - summary_covered_rounds
+    if rounds_to_keep <= 0:
+        return f"[对话摘要]\n{summary}"
+
+    user_count = 0
+    cutoff_idx = len(lines)
+    for i in range(len(lines)):
+        if lines[i].startswith("用户："):
+            user_count += 1
+        if user_count == summary_covered_rounds + 1:
+            cutoff_idx = i
+            break
+
+    recent_lines = lines[cutoff_idx:]
+    return f"[此前对话摘要]\n{summary}\n\n[最近 {rounds_to_keep} 轮对话]\n" + "\n".join(recent_lines)
 
 
 def _build_tool_descriptions(tools: List[BaseTool]) -> str:
@@ -125,6 +175,73 @@ def _build_react_agent(
 
 # ---------------- Plan-Act 节点函数 ----------------
 
+def _manage_memory(state: AgentState, llm) -> dict:
+    """管理对话记忆：滚动式摘要，未摘要历史积累到阈值时合并进摘要。"""
+    messages = state["messages"]
+    current_summary = state.get("conversation_summary")
+    covered = state.get("summary_covered_rounds", 0)
+
+    human_count = sum(1 for msg in messages if _is_human_message(msg))
+
+    # 未达到触发门槛（总轮数不足 20），不处理
+    if human_count < MEMORY_WINDOW_LIMIT:
+        return {}
+
+    # 计算自上次摘要后新增了多少轮未摘要的消息
+    new_rounds = human_count - covered
+
+    # 首次触发：covered=0，new_rounds=human_count（≥20 ≥15）
+    # 后续触发：new_rounds 需达到 MEMORY_TRIGGER_BATCH（15）
+    if new_rounds < MEMORY_TRIGGER_BATCH:
+        return {}
+
+    # 提取需要新摘要的消息：从 covered 之后到保留窗口之前的部分
+    user_counts = []
+    count = 0
+    for msg in messages:
+        if _is_human_message(msg):
+            count += 1
+        user_counts.append(count)
+
+    messages_to_summarize = []
+    for i, msg in enumerate(messages):
+        if covered < user_counts[i] <= human_count - MEMORY_WINDOW_KEEP:
+            messages_to_summarize.append(msg)
+
+    new_history_text = _build_dialogue_history(messages_to_summarize)
+
+    if current_summary:
+        prompt = f"""请根据以下信息更新对话摘要。
+
+[已有摘要]
+{current_summary}
+
+[新增需要纳入摘要的对话]
+{new_history_text}
+
+要求：
+1. 将新增对话的关键信息合并到已有摘要中
+2. 保留用户提到的具体名称、偏好、目标
+3. 简洁明了，用中文
+4. 去除重复信息，保持摘要紧凑"""
+    else:
+        prompt = f"""请对以下对话历史进行摘要，保留关键信息、用户意图和已确认的事实。
+要求：
+1. 简洁明了，用中文
+2. 保留用户提到的具体名称、偏好、目标
+3. 不要保留闲聊废话
+
+对话历史：
+{new_history_text}"""
+
+    response = llm.invoke([SystemMessage(content=prompt)])
+    new_covered = human_count - MEMORY_WINDOW_KEEP
+    return {
+        "conversation_summary": response.content,
+        "summary_covered_rounds": new_covered,
+    }
+
+
 def _classify_complexity(state: AgentState, llm, tools: List[BaseTool]) -> dict:
     """判断用户请求的复杂度（使用 PydanticOutputParser）。"""
     messages = state["messages"]
@@ -133,7 +250,9 @@ def _classify_complexity(state: AgentState, llm, tools: List[BaseTool]) -> dict:
         return {"is_complex": False}
 
     tool_desc = _build_tool_descriptions(tools)
-    dialogue_history = _build_dialogue_history(messages)
+    summary = state.get("conversation_summary")
+    covered = state.get("summary_covered_rounds", 0)
+    dialogue_history = _build_dialogue_history(messages, summary, covered)
     parser = PydanticOutputParser(pydantic_object=ComplexityJudgment)
 
     prompt = f"""你是一个任务复杂度判断助手。请分析用户的请求，判断它是否需要复杂的计划-执行流程。
@@ -165,7 +284,9 @@ def _generate_plan(state: AgentState, llm, tools: List[BaseTool]) -> dict:
     messages = state["messages"]
     user_content = _get_last_user_content(messages)
     tool_desc = _build_tool_descriptions(tools)
-    dialogue_history = _build_dialogue_history(messages)
+    summary = state.get("conversation_summary")
+    covered = state.get("summary_covered_rounds", 0)
+    dialogue_history = _build_dialogue_history(messages, summary, covered)
     parser = PydanticOutputParser(pydantic_object=Plan)
 
     prompt = f"""你是一个任务规划助手。请根据用户请求制定一个详细的执行计划。
@@ -350,7 +471,9 @@ def _summarize_results(state: AgentState, llm) -> dict:
         for r in step_results
     ])
 
-    dialogue_history = _build_dialogue_history(messages)
+    summary = state.get("conversation_summary")
+    covered = state.get("summary_covered_rounds", 0)
+    dialogue_history = _build_dialogue_history(messages, summary, covered)
 
     prompt = f"""根据以下执行结果和对话历史，生成对用户请求的完整回答。
 
@@ -482,6 +605,7 @@ def create_agent(
     # 构建 Plan-Act 外层图
     builder = StateGraph(AgentState)
 
+    builder.add_node("manage_memory", lambda state: _manage_memory(state, llm))
     builder.add_node("classify_complexity", lambda state: _classify_complexity(state, llm, tools))
     builder.add_node("react_agent", react_agent)
     builder.add_node("generate_plan", lambda state: _generate_plan(state, llm, tools))
@@ -490,7 +614,8 @@ def create_agent(
     builder.add_node("summarize_results", lambda state: _summarize_results(state, llm))
     builder.add_node("fallback_to_react", lambda state, config: _fallback_to_react(state, config, react_agent))
 
-    builder.set_entry_point("classify_complexity")
+    builder.set_entry_point("manage_memory")
+    builder.add_edge("manage_memory", "classify_complexity")
     builder.add_conditional_edges("classify_complexity", _route_by_complexity)
     builder.add_edge("react_agent", END)
     builder.add_edge("generate_plan", "execute_step")
