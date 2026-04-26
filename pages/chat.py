@@ -70,23 +70,44 @@ for msg in history:
 # ---------------- 执行计划卡片渲染 ----------------
 
 def _render_plan_card(plan, step_results, current_step_index, placeholder):
-    """在侧边栏渲染执行计划卡片：已完成标绿，当前步骤闪烁，失败标红。"""
+    """在侧边栏渲染执行计划卡片：已完成标绿，当前步骤闪烁，失败标红，每步显示目的。"""
     if not plan or not plan.steps:
         placeholder.empty()
         return
+
+    def _fmt(text, max_len=60):
+        return text[:max_len] + ("..." if len(text) > max_len else "")
 
     placeholder.empty()
     with placeholder.container():
         st.markdown("### 📋 执行计划")
         for i, step in enumerate(plan.steps):
             step_num = i + 1
+            purpose = _fmt(step.expected, 70)
             if i < len(step_results):
                 result = step_results[i]
                 if result.success and not result.deviation:
-                    st.success(f"✅ 步骤 {step_num}: `{step.action}`")
+                    st.markdown(
+                        f"""
+                        <div style="padding: 8px 12px; border-radius: 6px; margin-bottom: 6px; border-left: 4px solid #4caf50; background-color: #e8f5e9;">
+                            <strong>✅ 步骤 {step_num}: <code>{step.action}</code></strong><br/>
+                            <small style="color: #555;">🎯 目的：{purpose}</small>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
                 else:
-                    st.error(f"❌ 步骤 {step_num}: `{step.action}`")
+                    st.markdown(
+                        f"""
+                        <div style="padding: 8px 12px; border-radius: 6px; margin-bottom: 6px; border-left: 4px solid #f44336; background-color: #ffebee;">
+                            <strong>❌ 步骤 {step_num}: <code>{step.action}</code></strong><br/>
+                            <small style="color: #555;">🎯 目的：{purpose}</small>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
             elif i == current_step_index:
+                input_hint = _fmt(step.input, 50)
                 st.markdown(
                     f"""
                     <style>
@@ -97,13 +118,18 @@ def _render_plan_card(plan, step_results, current_step_index, placeholder):
                     </style>
                     <div style="animation: plan-blink-{step_num} 1.2s infinite; padding: 8px 12px; border-radius: 6px; margin-bottom: 6px; border-left: 4px solid #2196f3;">
                         <strong>⏳ 步骤 {step_num}: <code>{step.action}</code></strong><br/>
-                        <small style="color: #555;">{step.input[:80]}{'...' if len(step.input) > 80 else ''}</small>
+                        <small style="color: #555;">🎯 目的：{purpose}</small><br/>
+                        <small style="color: #888;">📥 参数：{input_hint}</small>
                     </div>
                     """,
                     unsafe_allow_html=True,
                 )
             else:
-                st.markdown(f"⚪ 步骤 {step_num}: `{step.action}`")
+                st.markdown(
+                    f"⚪ **步骤 {step_num}**: `{step.action}`<br/>"
+                    f"<small style='color:gray'>🎯 目的：{purpose}</small>",
+                    unsafe_allow_html=True,
+                )
             if i < len(plan.steps) - 1:
                 st.markdown("<div style='margin: 2px 0;'></div>", unsafe_allow_html=True)
         st.divider()
@@ -115,7 +141,12 @@ plan_card = st.sidebar.empty()
 # 恢复上一次的执行计划卡片（rerun 后保留）
 if st.session_state.get("execution_plan"):
     ep = st.session_state["execution_plan"]
-    _render_plan_card(ep.get("plan"), ep.get("step_results", []), ep.get("current_step_index", 0), plan_card)
+    if ep.get("plan") is None:
+        plan_card.empty()
+    else:
+        _render_plan_card(ep.get("plan"), ep.get("step_results", []), ep.get("current_step_index", 0), plan_card)
+else:
+    plan_card.empty()
 
 # 底部聊天输入
 user_input = st.chat_input("请输入消息...")
@@ -196,6 +227,14 @@ if user_input:
                             "current_step_index": current_step_index,
                         }
 
+                    elif node_name == "fallback_to_react":
+                        loading_placeholder.info("🔄 计划执行遇到困难，切换为直接回答模式...")
+                        current_plan = None
+                        current_step_results = []
+                        current_step_index = 0
+                        st.session_state["execution_plan"] = None
+                        plan_card.empty()
+
                     elif node_name in ("react_agent", "summarize_results"):
                         loading_placeholder.info("📝 正在生成回答...")
 
@@ -207,6 +246,8 @@ if user_input:
                 "step_results": current_step_results,
                 "current_step_index": current_step_index,
             }
+        else:
+            st.session_state["execution_plan"] = None
 
     # 流式完成后刷新页面，从历史加载完整对话
     st.rerun()

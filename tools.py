@@ -8,7 +8,7 @@ from memory_manager import save_user_info as _save_user_info_impl, get_user_info
 
 def _create_web_search_tool(max_results: int = 5) -> BaseTool:
     """
-    创建联网搜索工具。
+    创建联网搜索工具（使用 Tavily）。
 
     Args:
         max_results: 返回的最大搜索结果数。
@@ -16,15 +16,15 @@ def _create_web_search_tool(max_results: int = 5) -> BaseTool:
     Returns:
         配置好的联网搜索工具。
     """
-    from langchain_community.tools import DuckDuckGoSearchResults
+    from langchain_tavily import TavilySearch
 
     @tool
     def web_search(query: str) -> str:
         """
         当用户询问实时信息、最新新闻、当前事件、需要联网查询的内容时使用此工具。参数 query 为搜索关键词。
         """
-        search = DuckDuckGoSearchResults(max_results=max_results)
-        return search.run(query)
+        search = TavilySearch(max_results=max_results)
+        return search.invoke(query)
 
     return web_search
 

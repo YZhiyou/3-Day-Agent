@@ -251,15 +251,34 @@ def _check_progress(state: AgentState, llm) -> dict:
     if not last_result.success:
         return {"need_replan": True}
 
+    # 容错规则：get_user_info / retrieve_documents 返回空结果不算偏离
+    if plan and last_result.step_index < len(plan.steps):
+        step = plan.steps[last_result.step_index]
+        if step.action in ("get_user_info", "retrieve_documents"):
+            output_lower = last_result.output.lower()
+            if any(k in output_lower for k in ("未找到", "没有找到", "不存在", "暂无", "空", "no ", "not found", "no results")):
+                step_results = list(step_results)
+                step_results[-1] = StepResult(
+                    step_index=last_result.step_index,
+                    success=last_result.success,
+                    output=last_result.output,
+                    deviation=False,
+                )
+                return {"need_replan": False, "step_results": step_results}
+
     # 使用 LLM 判断是否偏离预期
     if plan and last_result.step_index < len(plan.steps):
         step = plan.steps[last_result.step_index]
         prompt = f"""判断以下步骤执行结果是否严重偏离预期。
 
+判断标准：
+- 工具调用成功但返回"未找到"、"不存在"、"空结果"等，不算偏离（这是正常情况，后续步骤可以继续）
+- 只有工具调用抛异常、返回完全无法使用的错误信息、或结果与预期严重不符导致后续步骤无法进行时，才算偏离
+
 步骤目标：{step.expected}
 实际结果：{last_result.output}
 
-是否严重偏离？如果结果完全不符合预期或无法继续后续步骤，回答 True；否则回答 False。"""
+是否严重偏离？"""
 
         parser = PydanticOutputParser(pydantic_object=DeviationCheck)
         full_prompt = prompt + "\n\n" + parser.get_format_instructions()
@@ -317,6 +336,19 @@ def _summarize_results(state: AgentState, llm) -> dict:
     }
 
 
+def _fallback_to_react(state: AgentState, config, react_agent) -> dict:
+    """Plan-Act 多次重规划失败后，回退到 ReAct Agent 直接回答，并清除计划状态。"""
+    result = react_agent.invoke(state, config)
+    # 清除计划状态，让前端清理侧边栏卡片
+    result["plan"] = None
+    result["step_results"] = []
+    result["current_step_index"] = 0
+    result["need_replan"] = False
+    result["replan_count"] = 0
+    result["is_complex"] = False
+    return result
+
+
 # ---------------- 条件路由 ----------------
 
 def _route_by_complexity(state: AgentState) -> str:
@@ -329,8 +361,8 @@ def _route_after_check(state: AgentState) -> str:
     if state.get("need_replan"):
         replan_count = state.get("replan_count", 0)
         if replan_count >= 3:
-            # 超过最大重规划次数，强制汇总已有结果
-            return "summarize_results"
+            # 超过最大重规划次数，回退到 ReAct Agent
+            return "fallback_to_react"
         return "generate_plan"
     plan = state.get("plan")
     current = state.get("current_step_index", 0)
@@ -420,6 +452,7 @@ def create_agent(
     builder.add_node("execute_step", lambda state: _execute_step(state, tools))
     builder.add_node("check_progress", lambda state: _check_progress(state, llm))
     builder.add_node("summarize_results", lambda state: _summarize_results(state, llm))
+    builder.add_node("fallback_to_react", lambda state, config: _fallback_to_react(state, config, react_agent))
 
     builder.set_entry_point("classify_complexity")
     builder.add_conditional_edges("classify_complexity", _route_by_complexity)
@@ -428,6 +461,7 @@ def create_agent(
     builder.add_edge("execute_step", "check_progress")
     builder.add_conditional_edges("check_progress", _route_after_check)
     builder.add_edge("summarize_results", END)
+    builder.add_edge("fallback_to_react", END)
 
     graph = builder.compile(checkpointer=memory)
 
