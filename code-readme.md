@@ -598,7 +598,7 @@ agent.invoke(
 
 **关键设计决策**：
 
-- **双模式流式输出 `stream_mode=["messages", "updates"]`**：`messages` 模式保留 AI 回复的逐字流式效果（`AIMessageChunk` 累加）；`updates` 模式捕获每个 LangGraph 节点的状态变更，用于驱动执行计划卡片的实时更新。两种模式并行，互不干扰。
+- **双模式流式输出 `stream_mode=["messages", "updates"]` + `subgraphs=True`**：`messages` 模式保留 AI 回复的逐字流式效果（`AIMessageChunk` 累加）；`updates` 模式捕获每个 LangGraph 节点的状态变更，用于驱动执行计划卡片的实时更新。启用 `subgraphs=True` 后，外层图能穿透到内层 `react_agent` 子图，捕获其内部的流式消息事件，使简单模式下的 ReAct Agent 也能逐字显示。`subgraphs=True` 时 chunk 格式变为 `(path, mode, payload)`，`path` 为空元组表示外层图事件，非空表示子图事件；`updates` 处理仅响应 `path == ()` 的外层节点状态更新，避免子图内部节点干扰执行计划卡片渲染。
 - **执行计划卡片 `_render_plan_card`**：在侧边栏动态渲染计划步骤，使用 Streamlit 原生组件区分状态：
   - 已完成且成功 → `st.success()`（绿色 ✅）
   - 已完成但失败/偏离 → `st.error()`（红色 ❌）
@@ -625,6 +625,7 @@ graph TB
 
     subgraph AGENT["智能体调度层"]
         AGENT_CORE["agent.py<br/>Plan-Act 外层 StateGraph"]
+        MEM_MGR["manage_memory<br/>滚动摘要 + 窗口记忆"]
         CLASSIFY["classify_complexity<br/>复杂度判断"]
         REACT["react_agent<br/>原 ReAct 子图"]
         GEN_PLAN["generate_plan<br/>生成执行计划"]
@@ -660,7 +661,8 @@ graph TB
     CLI --> AGENT_CORE
     WEB --> CHAT
     CHAT --> AGENT_CORE
-    AGENT_CORE --> CLASSIFY
+    AGENT_CORE --> MEM_MGR
+    MEM_MGR --> CLASSIFY
     CLASSIFY --> REACT
     CLASSIFY --> GEN_PLAN
     GEN_PLAN --> EXEC_STEP
@@ -699,12 +701,13 @@ graph TB
 **数据流说明**：
 
 1. **用户提问**（UI 层）→ `chat.py` 接收消息，通过 `stream_mode=["messages", "updates"]` 同时获取流式回复和节点状态更新。
-2. **复杂度判断**（智能体调度层）→ `classify_complexity` 判断任务简单或复杂。简单任务直接走 `react_agent` 子图；复杂任务进入 Plan-Act 流程。
-3. **计划生成与执行** → `generate_plan` 输出多步计划，`execute_step` 逐条调用工具，`check_progress` 检查执行结果。若偏离预期则自动重规划（最多 3 次），全部完成后由 `summarize_results` 汇总生成最终回答。
-4. **执行计划可视化** → `chat.py` 根据 `updates` 模式实时捕获节点状态，在侧边栏渲染执行计划卡片：已完成标绿、失败标红、当前步骤蓝色闪烁。
-5. **工具调用**（工具层）→ Agent 按需调用检索、记忆或搜索工具，获取外部信息。
-6. **检索与存储**（服务层 + 数据持久层）→ Parent-Child 混合检索 pipeline：Chroma 子块语义粗筛召回 Top-20 → ParentDocumentRetriever 返回完整父块 → BM25 在父块候选集上做关键词精排 → RRF 融合双通道结果 → DashScope Rerank 最终精排返回 Top-5。父文档由 JsonDocstore 持久化到 `./data/chroma/docstore.json`。记忆读写操作对应 SQLite/JSON 文件。
-7. **状态持久化** → 整个对话状态（包括 Plan、StepResult 等新增字段）由 SqliteSaver 写入 SQLite，实现跨会话恢复。
+2. **记忆管理**（智能体调度层）→ `manage_memory` 检查对话长度，当轮数达到阈值时调用 LLM 生成或更新滚动摘要，`summary_covered_rounds` 精确记录摘要覆盖范围。
+3. **复杂度判断**（智能体调度层）→ `classify_complexity` 注入完整对话历史（含滚动摘要+窗口原始消息）判断任务简单或复杂。简单任务直接走 `react_agent` 子图；复杂任务进入 Plan-Act 流程。
+4. **计划生成与执行** → `generate_plan` 输出多步计划，`execute_step` 逐条调用工具，`check_progress` 检查执行结果。若偏离预期则自动重规划（最多 3 次），全部完成后由 `summarize_results` 汇总生成最终回答。
+5. **执行计划可视化** → `chat.py` 根据 `updates` 模式实时捕获节点状态，在侧边栏渲染执行计划卡片：已完成标绿、失败标红、当前步骤蓝色闪烁。
+6. **工具调用**（工具层）→ Agent 按需调用检索、记忆或搜索工具，获取外部信息。
+7. **检索与存储**（服务层 + 数据持久层）→ Parent-Child 混合检索 pipeline：Chroma 子块语义粗筛召回 Top-20 → ParentDocumentRetriever 返回完整父块 → BM25 在父块候选集上做关键词精排 → RRF 融合双通道结果 → DashScope Rerank 最终精排返回 Top-5。父文档由 JsonDocstore 持久化到 `./data/chroma/docstore.json`。记忆读写操作对应 SQLite/JSON 文件。
+8. **状态持久化** → 整个对话状态（包括 Plan、StepResult、conversation_summary、summary_covered_rounds 等字段）由 SqliteSaver 写入 SQLite，实现跨会话恢复。
 
 ---
 
