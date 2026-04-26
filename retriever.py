@@ -1,12 +1,23 @@
 import logging
+import re
 from typing import Optional, Dict, Any, List
 
+from pydantic import Field
 from langchain_core.retrievers import BaseRetriever
 from langchain_core.documents import Document
 from langchain_chroma import Chroma
 
 from vector_store import load_vector_store, get_collection_stats
 from reranker import get_compression_retriever
+
+
+def _chinese_tokenizer(text: str) -> List[str]:
+    """
+    简易中文分词器：连续中文字符逐字切分，英文/数字保留为整体。
+
+    用于 BM25Retriever 的 preprocess_func，解决默认空格分词对中文无效的问题。
+    """
+    return [match.group(0) for match in re.finditer(r"[a-zA-Z0-9]+|[^a-zA-Z0-9\s]", text)]
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +100,135 @@ def build_rerank_retriever(
     logger.info(
         f"Rerank retriever built: search_type={search_type}, top_k={top_k}, "
         f"top_n={top_n}, model={model}"
+    )
+    return compression_retriever
+
+
+class HybridRetriever(BaseRetriever):
+    """
+    混合检索器：语义粗筛 + BM25 关键词精排 + RRF 融合。
+
+    工作流程：
+    1. 语义检索器先召回 semantic_k 个候选文档
+    2. 在这些候选上构建 BM25 索引，进行关键词匹配，召回 bm25_k 个
+    3. 使用倒数排名融合（RRF）合并两条通路的结果
+
+    若 rank-bm25 未安装，则自动降级为纯语义检索。
+    """
+    semantic_retriever: BaseRetriever
+    semantic_k: int = 20
+    bm25_k: int = 5
+    weights: List[float] = Field(default_factory=lambda: [0.5, 0.5])
+
+    def _get_relevant_documents(self, query: str) -> List[Document]:
+        """同步混合检索入口。"""
+        semantic_docs = self.semantic_retriever.invoke(query)
+        if not semantic_docs:
+            return []
+
+        bm25_docs = self._bm25_search(query, semantic_docs)
+        return self._rrf_fuse(semantic_docs, bm25_docs)
+
+    def _bm25_search(self, query: str, candidates: List[Document]) -> List[Document]:
+        """在语义候选上构建 BM25 索引并进行关键词检索。"""
+        try:
+            from langchain_community.retrievers import BM25Retriever
+        except ImportError:
+            logger.warning("BM25Retriever 不可用，跳过关键词检索")
+            return []
+
+        if len(candidates) <= 1:
+            return candidates
+
+        try:
+            bm25 = BM25Retriever.from_documents(
+                candidates, preprocess_func=_chinese_tokenizer
+            )
+            bm25.k = min(self.bm25_k, len(candidates))
+            return bm25.invoke(query)
+        except Exception as exc:
+            logger.warning(f"BM25 检索失败: {exc}，降级为纯语义检索")
+            return []
+
+    def _rrf_fuse(
+        self, semantic_docs: List[Document], bm25_docs: List[Document]
+    ) -> List[Document]:
+        """倒数排名融合（Reciprocal Rank Fusion）。"""
+        k = 60  # RRF 常数
+        scores: Dict[str, float] = {}
+        doc_map: Dict[str, Document] = {}
+
+        lists = [
+            (self.weights[0], semantic_docs),
+            (
+                self.weights[1] if len(self.weights) > 1 else 0.5,
+                bm25_docs,
+            ),
+        ]
+
+        for weight, docs in lists:
+            for rank, doc in enumerate(docs):
+                key = doc.page_content
+                scores[key] = scores.get(key, 0.0) + weight * (1.0 / (k + rank + 1))
+                doc_map[key] = doc
+
+        sorted_items = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        return [doc_map[key] for key, _ in sorted_items]
+
+
+def build_hybrid_rerank_retriever(
+    persist_dir: str = "./data/chroma",
+    search_type: str = "similarity",
+    semantic_k: int = 20,
+    bm25_k: int = 5,
+    top_n: int = 5,
+    model: str = "qwen3-vl-rerank",
+    weights: Optional[List[float]] = None,
+) -> BaseRetriever:
+    """
+    构建混合检索 + Rerank 精排检索器。
+
+    工作流程：
+    1. 向量检索器从 Chroma 中召回 semantic_k 个候选文档（语义粗筛）
+    2. BM25 在这批候选上进行关键词精排，召回 bm25_k 个
+    3. RRF 算法融合语义和关键词两条通路的结果
+    4. DashScope Reranker 对融合结果最终精排，返回 top_n
+
+    Args:
+        persist_dir: 向量库持久化目录。
+        search_type: 搜索类型，"similarity" 或 "mmr"。
+        semantic_k: 语义通路召回数量。
+        bm25_k: 关键词通路召回数量。
+        top_n: Rerank 后最终返回数量。
+        model: 重排序模型名称。
+        weights: RRF 融合权重 [语义权重, 关键词权重]，默认 [0.5, 0.5]。
+
+    Returns:
+        带混合检索和重排序能力的检索器实例。
+    """
+    if weights is None:
+        weights = [0.5, 0.5]
+
+    vectordb = load_vector_store(persist_dir)
+    semantic_retriever = vectordb.as_retriever(
+        search_type=search_type,
+        search_kwargs={"k": semantic_k}
+    )
+
+    hybrid = HybridRetriever(
+        semantic_retriever=semantic_retriever,
+        semantic_k=semantic_k,
+        bm25_k=bm25_k,
+        weights=weights,
+    )
+
+    compression_retriever = get_compression_retriever(
+        hybrid, model=model, top_n=top_n
+    )
+    logger.info(
+        f"Hybrid rerank retriever built: search_type={search_type}, "
+        f"semantic_k={semantic_k}, bm25_k={bm25_k}, top_n={top_n}, "
+        f"weights={weights}, model={model}"
     )
     return compression_retriever
 

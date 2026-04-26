@@ -7,7 +7,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from vector_store import load_vector_store
-from retriever import build_retriever, build_rerank_retriever
+from retriever import build_retriever, build_rerank_retriever, build_hybrid_rerank_retriever
 from tools import create_tools
 from agent import create_agent
 from utils_web import _record_session
@@ -58,9 +58,9 @@ with center_col:
                 st.error(f"加载知识库失败: {e}")
                 st.stop()
 
-            # 构建检索器（带重排序）
+            # 构建检索器（混合检索 + 重排序）
             try:
-                retriever = build_rerank_retriever(top_k=20, top_n=5)
+                retriever = build_hybrid_rerank_retriever(semantic_k=20, bm25_k=5, top_n=5)
             except Exception as e:
                 st.error(f"构建检索器失败: {e}")
                 st.stop()
