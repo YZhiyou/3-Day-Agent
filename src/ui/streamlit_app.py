@@ -3,24 +3,24 @@ import uuid
 import os
 import sys
 
-# 确保能导入根目录下的后端模块
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# 确保能导入 src 下的模块
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from vector_store import load_vector_store
-from retriever import (
+from src.tools.vector_store import load_vector_store
+from src.tools.retriever import (
     build_retriever,
     build_rerank_retriever,
     build_hybrid_rerank_retriever,
     build_parent_child_hybrid_rerank_retriever,
 )
-from tools import create_tools
-from agent import create_agent
-from utils_web import _record_session
+from src.tools.tools import create_tools
+from src.core.agent import create_agent
+from src.ui.utils_web import _record_session
 
 
 def init_session_state():
     """首次运行时初始化全局 session_state 键为 None。"""
-    for key in ["user_id", "session_id", "agent", "vectordb", "retriever"]:
+    for key in ["user_id", "session_id", "agent", "vectordb", "retriever", "multi_agent_graph"]:
         if key not in st.session_state:
             st.session_state[key] = None
 
@@ -65,7 +65,7 @@ with center_col:
 
             # 构建检索器（Parent-Child 混合检索 + 重排序）
             try:
-                from vector_store import is_parent_child_mode
+                from src.tools.vector_store import is_parent_child_mode
                 if is_parent_child_mode("./data/chroma"):
                     retriever = build_parent_child_hybrid_rerank_retriever(semantic_k=20, bm25_k=5, top_n=5)
                 else:
@@ -98,6 +98,14 @@ with center_col:
             st.session_state.vectordb = vectordb
             st.session_state.retriever = retriever
             st.session_state.agent = agent
+
+            # 初始化多 Agent 协作图
+            from src.multi_agent.multi_agent_graph import build_multi_agent_graph
+            multi_agent_graph = build_multi_agent_graph(
+                plan_act_graph=st.session_state.agent,
+                tools=tools,
+            )
+            st.session_state["multi_agent_graph"] = multi_agent_graph
 
             # 记录会话
             _record_session(user_id, session_id)

@@ -10,12 +10,12 @@ from langchain_chroma import Chroma
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_classic.retrievers.parent_document_retriever import ParentDocumentRetriever
 
-from vector_store import (
+from src.tools.vector_store import (
     load_vector_store,
     get_collection_stats,
     load_parent_child_vector_store,
 )
-from reranker import get_compression_retriever
+from src.tools.reranker import get_compression_retriever
 
 
 def _chinese_tokenizer(text: str) -> List[str]:

@@ -4,12 +4,12 @@ import os
 import sys
 
 # 将项目根目录加入 sys.path，以便导入后端模块
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from langchain_core.messages import AIMessage, AIMessageChunk
-from agent import create_agent
-from tools import create_tools
-from utils_web import _record_session, _load_chat_history, _update_session_title, _preprocess_latex
+from src.core.agent import create_agent
+from src.tools.tools import create_tools
+from src.ui.utils_web import _record_session, _load_chat_history, _update_session_title, _preprocess_latex
 
 st.set_page_config(page_title="聊天", layout="wide")
 
@@ -44,6 +44,9 @@ if st.sidebar.button("🧠 长期记忆", width='stretch'):
 
 if st.sidebar.button("📜 历史对话", width='stretch'):
     st.switch_page("pages/history.py")
+
+if st.sidebar.button("🤖 多Agent协作", width='stretch'):
+    st.switch_page("pages/multi_agent.py")
 
 # 仅管理员可见
 if user_id == "admin":

@@ -7,7 +7,7 @@ from langchain.chat_models import init_chat_model
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.sqlite import SqliteSaver
-from error_handler import create_error_handler_node
+from src.core.error_handler import create_error_handler_node
 import json
 import os
 import sqlite3

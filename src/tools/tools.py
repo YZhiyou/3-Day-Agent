@@ -3,7 +3,7 @@ from typing import List
 from langchain_core.tools import tool, BaseTool
 from langchain_core.retrievers import BaseRetriever
 
-from memory_manager import save_user_info as _save_user_info_impl, get_user_info as _get_user_info_impl
+from src.core.memory_manager import save_user_info as _save_user_info_impl, get_user_info as _get_user_info_impl
 
 
 def _create_web_search_tool(max_results: int = 5) -> BaseTool:

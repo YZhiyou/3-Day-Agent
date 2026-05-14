@@ -2,11 +2,11 @@ import streamlit as st
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from utils_web import _load_sessions, _delete_session_record
-from agent import create_agent
-from tools import create_tools
+from src.ui.utils_web import _load_sessions, _delete_session_record
+from src.core.agent import create_agent
+from src.tools.tools import create_tools
 
 st.set_page_config(page_title="历史对话", layout="wide")
 
@@ -21,12 +21,35 @@ if not st.session_state.get("user_id"):
     st.switch_page("streamlit_app.py")
 
 # 侧边栏
-if st.sidebar.button("⬅️ 返回聊天", width='stretch'):
+user_id = st.session_state.user_id
+st.sidebar.markdown(f"**当前用户：** `{user_id}`")
+st.sidebar.divider()
+
+if st.sidebar.button("💬 聊天", width='stretch'):
     st.switch_page("pages/chat.py")
+if st.sidebar.button("📚 知识库", width='stretch'):
+    st.switch_page("pages/kb.py")
+if st.sidebar.button("🧠 长期记忆", width='stretch'):
+    st.switch_page("pages/memory.py")
+if st.sidebar.button("📜 历史对话", width='stretch'):
+    st.switch_page("pages/history.py")
+if st.sidebar.button("🤖 多Agent协作", width='stretch'):
+    st.switch_page("pages/multi_agent.py")
+
+# 仅管理员可见
+if user_id == "admin":
+    if st.sidebar.button("🔧 管理员", width='stretch'):
+        st.switch_page("pages/admin.py")
+
+st.sidebar.divider()
+
+if st.sidebar.button("🚪 退出登录", width='stretch'):
+    for key in ["user_id", "session_id", "agent", "vectordb", "retriever"]:
+        st.session_state[key] = None
+    st.switch_page("streamlit_app.py")
 
 st.title("📜 历史对话")
 
-user_id = st.session_state.user_id
 sessions = _load_sessions(user_id)
 
 if not sessions:

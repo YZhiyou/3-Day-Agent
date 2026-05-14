@@ -17,17 +17,17 @@ for k in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
 
 from langchain_core.messages import AIMessageChunk, HumanMessage, AIMessage
 
-from retriever import (
+from src.tools.retriever import (
     build_retriever,
     build_rerank_retriever,
     build_hybrid_rerank_retriever,
     build_parent_child_hybrid_rerank_retriever,
 )
-from memory_manager import get_session_history
-from tools import create_tools
-from agent import create_agent
-from kb_manager import add_file_to_kb, delete_file_from_kb, rebuild_kb, search_kb
-from vector_store import load_vector_store, get_collection_stats
+from src.core.memory_manager import get_session_history
+from src.tools.tools import create_tools
+from src.core.agent import create_agent
+from src.tools.kb_manager import add_file_to_kb, delete_file_from_kb, rebuild_kb, search_kb
+from src.tools.vector_store import load_vector_store, get_collection_stats
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ def main():
 
     # 启动前检查向量库是否存在，若不存在可提示先构建
     # Parent-Child 向量库不存在时自动降级到旧版混合检索器
-    from vector_store import is_parent_child_mode
+    from src.tools.vector_store import is_parent_child_mode
     if is_parent_child_mode(PERSIST_DIR):
         retriever = build_parent_child_hybrid_rerank_retriever(semantic_k=20, bm25_k=5, top_n=5)
     else:

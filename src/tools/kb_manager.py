@@ -6,7 +6,7 @@ from typing import List, Optional, Callable
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 
-from vector_store import (
+from src.tools.vector_store import (
     add_documents,
     load_vector_store,
     create_vector_store,
@@ -17,7 +17,7 @@ from vector_store import (
     is_parent_child_mode,
     JsonDocstore,
 )
-from document_loader import load_documents, SUPPORTED_EXT
+from src.tools.document_loader import load_documents, SUPPORTED_EXT
 
 logger = logging.getLogger(__name__)
 
