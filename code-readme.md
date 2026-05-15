@@ -88,11 +88,10 @@ DASHSCOPE_API_KEY=your-dashscope-api-key
 
 # 方式一：WebUI（推荐）
 python start.py
-# 或直接使用 streamlit
-streamlit run streamlit_app.py
+# start.py 会自动定位虚拟环境并启动 src/ui/streamlit_app.py
 
 # 方式二：CLI
-python cli.py
+python -m src.ui.cli
 ```
 
 首次启动时，系统会自动尝试加载已持久化的向量库。若向量库不存在，可通过 CLI 的 `/kb rebuild` 命令或 WebUI 的"重建知识库"功能，从 `./documents` 目录构建初始索引。
@@ -209,7 +208,7 @@ WebUI 采用 Streamlit 多页面架构，入口为 `streamlit_app.py`。
 
 ---
 
-### 4.1 `vector_store.py` —— 文档分块、向量化与 Chroma 持久化
+### 4.1 `src/tools/vector_store.py` —— 文档分块、向量化与 Chroma 持久化
 
 **业务职责**：将原始文档转换为可语义检索的向量表示，并持久化到本地 Chroma 数据库。
 
@@ -286,7 +285,7 @@ Chroma.add_documents() ──▶ 持久化到 ./data/chroma
 
 ---
 
-### 4.2 `retriever.py` / `reranker.py` —— 检索策略封装与混合检索
+### 4.2 `src/tools/retriever.py` / `src/tools/reranker.py` —— 检索策略封装与混合检索
 
 **业务职责**：从向量库中召回相关文档，并封装多阶段检索 pipeline（语义检索 → 关键词精排 → RRF 融合 → Rerank 精排），以标准 `BaseRetriever` 形式供上层链式调用。
 
@@ -356,7 +355,7 @@ Chroma.add_documents() ──▶ 持久化到 ./data/chroma
 
 ---
 
-### 4.3 `kb_manager.py` —— 知识库的增删重建管理
+### 4.3 `src/tools/kb_manager.py` —— 知识库的增删重建管理
 
 **业务职责**：以**文件**为粒度管理知识库内容，支持单文件增删、全库重建和知识库内搜索。
 
@@ -394,7 +393,7 @@ docs_directory ──▶ load_documents() ──▶ create_parent_child_vector_s
 
 ---
 
-### 4.4 `tools.py` —— Agent 可调用的工具定义
+### 4.4 `src/tools/tools.py` —— Agent 可调用的工具定义
 
 **业务职责**：为 Agent 封装三个核心能力——**知识库检索**、**长期记忆读写**、**联网实时搜索**——并以 LangChain `BaseTool` 列表形式暴露。
 
@@ -428,7 +427,7 @@ create_tools(user_id, retriever, enable_web_search)
 
 ---
 
-### 4.5 `memory_manager.py` —— 短期会话记忆 + 长期用户记忆
+### 4.5 `src/core/memory_manager.py` —— 短期会话记忆 + 长期用户记忆
 
 **业务职责**：管理两层记忆：
 - **短期记忆**：当前会话的多轮对话历史，支持跨重启的连续对话。
@@ -472,7 +471,7 @@ user_id ──▶ ./data/user_info/{user_id}.json
 
 ---
 
-### 4.6 `agent.py` —— Plan-Act 智能体调度层
+### 4.6 `src/core/agent.py` —— Plan-Act 智能体调度层
 
 **业务职责**：将所有组件（LLM、工具、系统提示词、记忆持久化）装配成一个**Plan-Act 模式**的智能体。原 ReAct Agent 作为子图嵌入，复杂任务自动分解执行，简单任务直接走原 ReAct 流程。
 
@@ -538,6 +537,9 @@ CompiledStateGraph（配置 recursion_limit + SqliteSaver）
 **调用方式**：
 
 ```python
+from src.core.agent import create_agent
+agent = create_agent(tools)
+
 agent.invoke(
     {"messages": [{"role": "user", "content": "..."}]},
     {"configurable": {"thread_id": "session_id"}}
@@ -546,7 +548,7 @@ agent.invoke(
 
 ---
 
-### 4.7 `error_handler.py` —— 对话容错与追问模块
+### 4.7 `src/core/error_handler.py` —— 对话容错与追问模块
 
 **业务职责**：作为独立的 LangGraph state_node，在复杂度判断之前对用户原始输入进行质量检查，决定是否放行还是触发容错策略（追问/澄清/兜底）。通过提前拦截模糊输入、纠正意图和缺失槽位，避免浪费 LLM 调用做无意义的复杂度判断或计划生成。
 
@@ -609,7 +611,7 @@ agent.invoke(
 
 ---
 
-### 4.8 `streamlit_app.py` —— WebUI 入口与模块装配
+### 4.8 `src/ui/streamlit_app.py` —— WebUI 入口与模块装配
 
 **业务职责**：Streamlit 多页面应用的入口页面，负责用户登录、全局状态初始化、以及各后端模块的**装配**。
 
@@ -643,7 +645,7 @@ agent.invoke(
 
 ---
 
-### 4.9 `pages/chat.py` —— 聊天页面与执行计划可视化
+### 4.9 `src/ui/pages/chat.py` —— 聊天页面与执行计划可视化
 
 **业务职责**：Streamlit 聊天主页面，负责对话渲染、用户输入处理、Agent 流式输出，以及**复杂任务时的执行计划实时可视化**。
 
@@ -690,19 +692,326 @@ agent.invoke(
 
 ---
 
+### 4.10 `src/multi_agent/multi_agent_state.py` —— 多智能体共享状态模型
+
+**业务职责**：定义多智能体协作所需的核心数据结构，为消息总线、任务调度、并发控制提供统一的 Pydantic 模型和 TypedDict。
+
+**核心业务逻辑**：
+
+```
+MultiAgentState (TypedDict, 继承自 AgentState)
+    │
+    ├──▶ MessageBus（消息总线）
+    │       ├── pending: List[MessageBusEntry]     待处理队列
+    │       ├── processing: List[MessageBusEntry]  处理中队列
+    │       └── archived: List[MessageBusEntry]    已归档队列
+    │
+    ├──▶ MessageBusEntry（单条消息）
+    │       ├── type: TASK / RESULT / QUERY / BROADCAST
+    │       ├── sender / receiver / payload
+    │       └── status: CREATED → PENDING → DELIVERED → PROCESSING → COMPLETED → ARCHIVED
+    │
+    ├──▶ AgentCapability（代理能力注册）
+    │       ├── agent_name / skills[] / status / max_concurrent
+    │       └── 用于路由匹配：required_capability ∈ skills
+    │
+    ├──▶ AgentTask（任务模型，含依赖关系）
+    │       ├── task_id / description / required_capability
+    │       ├── dependencies: List[str]（依赖的 task_id 列表）
+    │       └── status: PENDING / IN_PROGRESS / COMPLETED / FAILED
+    │
+    ├──▶ SharedScratchpad（乐观锁共享记事本）
+    │       ├── data: Dict[str, ScratchpadItem]
+    │       ├── get(key) / set(key, value, expected_version) → bool
+    │       └── get_version(key) → int
+    │
+    └──▶ 状态字段
+            ├── message_bus / task_queue / agent_registry
+            ├── shared_scratchpad（自定义 reducer merge_shared_scratchpad 深合并）
+            ├── agent_private（各 Agent 私有状态，含 inbox 消息队列）
+            ├── new_message_dict / new_message_batch（待发布消息）
+            ├── final_summary_ready（所有任务完成标记）
+            └── agent_progress（各 Agent 执行进度）
+```
+
+**关键设计决策**：
+
+- **继承 AgentState**：`MultiAgentState` 完全兼容单 Agent 的 `AgentState`，所有 Plan-Act 状态字段（messages、plan、step_results、pending_clarification 等）原样保留，确保 Plan-Act 子图可直接被多 Agent 图内嵌调用。
+- **MessageBus 基于 Pydantic**：消息总线使用 Pydantic `BaseModel`，天然支持 `model_dump()` 序列化，与 `SqliteSaver` 兼容。`MessageType` 和 `MessageStatus` 使用 `str Enum`，便于 JSON 序列化。
+- **SharedScratchpad 乐观锁**：并发写入场景下（如 researcher 和 analyst 同时完成），通过 `expected_version` 实现乐观锁。写入前读取当前版本号，写入时校验版本号是否匹配，不匹配则重试。`merge_shared_scratchpad` 自定义 reducer 确保 LangGraph 状态合并时数据不丢失。
+- **Agent 私有状态隔离**：`agent_private` 为每个 Agent 维护独立的 inbox 消息队列，各 Agent 只读取自己的 inbox，写入他人的 inbox 需通过消息总线投递，天然实现状态隔离。
+- **`create_initial_multi_agent_state`**：工厂函数为所有 MultiAgentState 字段提供默认值，同时支持 kwargs 覆盖，简化多 Agent 图的初始化。
+
+**对外接口**：
+
+| 类/函数 | 作用 |
+|---------|------|
+| `MessageType` | 消息类型枚举（TASK/RESULT/QUERY/BROADCAST） |
+| `MessageStatus` | 消息生命周期状态枚举 |
+| `MessageBusEntry` | 单条消息的 Pydantic 模型 |
+| `MessageBus` | 消息总线，提供 publish/consume/complete 方法 |
+| `AgentCapability` | 代理能力描述模型 |
+| `AgentTask` | 任务模型（含依赖声明） |
+| `SharedScratchpad` | 乐观锁共享记事本 |
+| `MultiAgentState` | 多智能体 TypedDict 状态 |
+| `create_initial_multi_agent_state(**kwargs)` | 初始化多 Agent 状态字典 |
+| `get_agent_private(state, agent_name)` | 安全获取 Agent 私有状态 |
+| `set_agent_private(state, agent_name, key, value)` | 设置 Agent 私有状态 |
+
+---
+
+### 4.11 `src/multi_agent/supervisor.py` —— Supervisor 调度逻辑
+
+**业务职责**：作为多 Agent 协作图的入口节点，负责**任务分解**（decompose_task）、**冲突检测**（detect_conflicts）和**调度决策**（supervisor_node）。
+
+**核心业务逻辑**：
+
+```
+用户请求
+    │
+    ▼
+supervisor_node (LangGraph 状态图节点)
+    │
+    ├── 分支 A（首次运行，task_queue 为空）
+    │       ├── 从 messages 提取最新 HumanMessage
+    │       ├── decompose_task(user_request) → List[AgentTask]
+    │       │       ├── 含"评审"/"论文" → 4 个子任务
+    │       │       │   task_1（提取论点，依赖 task_2）
+    │       │       │   task_2（查证事实，无依赖）
+    │       │       │   task_3（批判逻辑，依赖 task_2）
+    │       │       │   task_4（撰写报告，依赖 task_1/2/3）
+    │       │       └── 通用 → 1 个通用任务
+    │       ├── 无依赖任务 → 生成 TASK 消息 → 放入 new_message_batch
+    │       └── 返回 {"task_queue": tasks, "new_message_batch": batch}
+    │
+    └── 分支 B（后续运行，处理 RESULT 消息）
+            ├── 读取 supervisor inbox 中的 RESULT 消息
+            ├── 更新对应 task 状态为 COMPLETED，存储 result
+            ├── 从 inbox 移除已处理消息
+            ├── 扫描 task_queue，解锁依赖已满足的 PENDING 任务
+            │       └── 生成 TASK 消息 → new_message_batch
+            ├── 检查 all_completed → 设置 final_summary_ready=True
+            └── 返回状态更新字典
+```
+
+**对外接口**：
+
+| 函数 | 作用 |
+|------|------|
+| `decompose_task(user_request, llm_call)` | 将用户请求分解为 AgentTask 列表 |
+| `detect_conflicts(task_results)` | 检查多 Agent 结果是否存在矛盾结论 |
+| `supervisor_node(state)` | LangGraph 调度节点（state_node） |
+
+---
+
+### 4.12 `src/multi_agent/message_bus.py` —— 消息总线节点
+
+**业务职责**：实现智能体间异步通信的三阶段流水线——publish（发布）、router（路由）、dispatch（投递），作为独立的 LangGraph 子图运行。
+
+**核心业务逻辑**：
+
+```
+new_message_dict / new_message_batch
+    │
+    ▼
+┌──────────────────────────────────────────────────────┐
+│  publish_node                                        │
+│  ├── msg_dict → MessageBusEntry（单条发布）            │
+│  └── msg_batch → MessageBusEntry × N（批量发布）       │
+│  发布后清空 new_message_dict / new_message_batch      │
+└──────────────────────────────────────────────────────┘
+    │
+    ▼
+┌──────────────────────────────────────────────────────┐
+│  router_node                                         │
+│  遍历 pending 队列中 PENDING 状态的消息，生成路由决策：  │
+│  ├── TASK: 按 required_capability 匹配 agent_registry│
+│  │         └── 取负载最小（inbox 最短）的在线 agent    │
+│  ├── RESULT: 固定投递给 "supervisor"                  │
+│  ├── QUERY: 投递给指定 receiver（需在线）              │
+│  └── BROADCAST: 投递给所有在线且非 sender 的 agent     │
+│  决策存入 agent_private["__bus_routing__"]            │
+└──────────────────────────────────────────────────────┘
+    │
+    ▼
+┌──────────────────────────────────────────────────────┐
+│  dispatch_node                                       │
+│  ├── 按路由决策深拷贝消息副本 → 投递到目标 inbox       │
+│  ├── 原消息从 pending 移除 → 插入 processing 列表     │
+│  ├── 清除 __bus_routing__                            │
+│  └── 更新收到新消息的 agent_progress 状态为 "BUSY"     │
+└──────────────────────────────────────────────────────┘
+```
+
+**对外接口**：
+
+| 函数 | 作用 |
+|------|------|
+| `publish_node(state)` | 将消息字典发布到 MessageBus pending 队列 |
+| `router_node(state)` | 遍历 pending 消息生成路由决策 |
+| `dispatch_node(state)` | 按路由决策投递消息到 Agent inbox |
+| `build_message_bus_demo_graph()` | 构建消息总线演示图（MemorySaver） |
+
+---
+
+### 4.13 `src/multi_agent/agents.py` —— 多智能体执行节点
+
+**业务职责**：实现三个专业 Agent 的 LangGraph 执行节点——Researcher（文献检索）、Analyst（文献分析）、Writer（报告撰写），通过统一的 `generic_agent_step` 模板封装「取 inbox → 处理 → 回传 RESULT」的标准循环。
+
+**核心业务逻辑**：
+
+```
+generic_agent_step(state, agent_name, capability_handler)
+    │
+    ├── 1. 从 agent_private[agent_name]["inbox"] 取出第一条消息
+    ├── 2. 若 inbox 为空 → 返回 {}（跳过）
+    ├── 3. 调用 capability_handler(state, message) → result_payload
+    ├── 4. 构造 RESULT 消息 → 追加到 new_message_batch
+    ├── 5. 从 inbox 移除已处理消息（深拷贝后 pop）
+    ├── 6. 更新 agent_progress 为 IDLE
+    └── 7. 返回部分状态更新字典
+        （agent_private / new_message_batch / agent_progress）
+
+researcher_node → _handle_retrieve → 模拟检索结果 → 写入 scratchpad["retrieved_docs"]
+analyst_node    → _handle_analyze  → 按描述判断分析类型
+                                      ├── "论点"/"提取" → claims → scratchpad["claims"]
+                                      ├── "批判"/"逻辑" → critique → scratchpad["critique"]
+                                      └── 其他 → analysis → scratchpad["analysis"]
+writer_node     → 独立逻辑（不用 generic_agent_step）
+                  ├── 从 scratchpad 汇总 claims/critique/retrieved_docs
+                  ├── 兼容模拟节点（结构化）和适配节点（{"content":"...", "source":"..."}）两种格式
+                  ├── _build_report() → Markdown 格式评审报告
+                  └── 以 AIMessage 写入 messages（用户可见）
+```
+
+**关键设计决策**：
+
+- **`generic_agent_step` 模板**：提炼 researcher 和 analyst 的共同逻辑（inbox 读取 → 处理 → RESULT 回传），避免重复代码。`capability_handler` 以回调形式注入具体业务逻辑。
+- **writer 独立实现**：报告撰写 Agent 需要将最终结果以 `AIMessage` 写入 messages（用户可见），与 internals（仅写 scratchpad 做中间流转）有本质区别，故走独立节点逻辑。
+- **`_is_adapter_format`**：writer 在读取 scratchpad 时，自动检测数据格式（模拟节点的结构化 dict vs 适配节点的 `{"content":"...", "source":"..."}`），生成报告时统一处理，确保双模式兼容。
+- **scratchpad 乐观锁写入**：researcher 和 analyst 在写入 scratchpad 时使用 `expected_version` 校验，失败时自动重试一次，与 `multi_agent_state.py` 的乐观锁机制一致。
+
+**对外接口**：
+
+| 函数 | 作用 |
+|------|------|
+| `generic_agent_step(state, agent_name, capability_handler)` | 通用 Agent 执行模板 |
+| `researcher_node(state)` | Researcher 执行节点 |
+| `analyst_node(state)` | Analyst 执行节点 |
+| `writer_node(state)` | Writer 执行节点（直接写入 messages） |
+
+---
+
+### 4.14 `src/multi_agent/agent_adapters.py` —— Plan-Act 子图适配器
+
+**业务职责**：将 `src/core/agent.py` 中的 Plan-Act CompiledStateGraph 包装为多 Agent 协作图中的节点函数，实现单 Agent 能力复用——每个专业 Agent 内部可运行完整的 Plan-Act 推理流程（error_handler → classify → react_agent / plan_act_loop）。
+
+**核心业务逻辑**：
+
+```
+wrap_plan_act_as_agent(agent_name, plan_act_graph, tools)
+    │
+    └──▶ 返回 agent_node(state: dict) -> dict
+            │
+            ├── 1. 从 inbox 取第一条 TASK 消息
+            ├── 2. 提取 payload.description + user_query → 拼装完整 prompt
+            ├── 3. 构造 AgentState 子状态字典
+            ├── 4. 生成独立 thread_id（agent_name_task_id_uuid）
+            │       └── invoke plan_act_graph.sub(config) → result_state
+            ├── 5. try/except 包裹：子图失败 → 返回错误 RESULT（不让多Agent图崩溃）
+            ├── 6. 提取最后一条 AIMessage.content 作为结果
+            ├── 7. 写入 shared_scratchpad（乐观锁，key 按 _resolve_scratchpad_key 规则对齐）
+            ├── 8. 构造 RESULT 消息 → 追加 new_message_batch
+            ├── 9. 从 inbox 移除已处理消息
+            └──10. 返回状态更新字典
+```
+
+**对外接口**：
+
+| 函数 | 作用 |
+|------|------|
+| `wrap_plan_act_as_agent(agent_name, plan_act_graph, tools)` | 通用 Plan-Act → Agent Node 适配器 |
+| `create_adapted_researcher_node(plan_act_graph, tools)` | 创建适配后的 Researcher 节点 |
+| `create_adapted_analyst_node(plan_act_graph, tools)` | 创建适配后的 Analyst 节点 |
+
+---
+
+### 4.15 `src/multi_agent/multi_agent_graph.py` —— 多 Agent 协作图构建
+
+**业务职责**：将所有多 Agent 模块组装为完整的 LangGraph 协作图，实现 Supervisor → 消息总线 → Agent 执行 → 结果回传的闭环。
+
+**核心业务逻辑**：
+
+```
+build_multi_agent_graph(plan_act_graph=None, tools=None)
+    │
+    ▼
+StateGraph(MultiAgentState) ──▶ 编译后的 LangGraph CompiledGraph
+    │
+    ├── 节点（7 个）
+    │   ├── supervisor ── supervisor_node（任务分解 + 依赖调度）
+    │   ├── publish     ── publish_node（消息发布到总线）
+    │   ├── router      ── router_node（路由决策）
+    │   ├── dispatch    ── dispatch_node（消息投递到 inbox）
+    │   ├── researcher  ── 模拟节点 / Plan-Act 适配节点
+    │   ├── analyst     ── 模拟节点 / Plan-Act 适配节点
+    │   └── writer      ── writer_node（报告生成）
+    │
+    ├── 边
+    │   ├── START → supervisor
+    │   ├── supervisor → publish → router → dispatch（线性流水线）
+    │   ├── dispatch → route_to_agents（条件边）
+    │   │       ├── researcher inbox 非空 → researcher
+    │   │       ├── analyst inbox 非空 → analyst
+    │   │       ├── writer inbox 非空 → writer
+    │   │       ├── 所有 inbox 空 + final_summary_ready → END
+    │   │       └── 所有 inbox 空 + 未完成 → supervisor（继续循环）
+    │   ├── researcher → publish（RESULT 经总线路由回 supervisor）
+    │   ├── analyst → publish
+    │   └── writer → publish
+    │
+    └── Checkpointer: MemorySaver（内存版，可替换为 SqliteSaver）
+```
+
+**关键设计决策**：
+
+- **Plan-Act 双模式支持**：`build_multi_agent_graph(plan_act_graph=...)` 接受可选的 Plan-Act 子图。传入时 researcher/analyst 使用 `agent_adapters` 包装的真实推理节点；不传时使用 `agents.py` 的模拟节点（快速验证架构可用性）。
+- **循环机制**：协作图的核心循环是 `dispatch → route_to_agents → agent → publish → router → dispatch`。Supervisor 在开始和每次所有 inbox 清空后重新介入，检查是否有可解锁的依赖任务或所有任务已完成。
+- **条件路由 `route_to_agents`**：按 researcher → analyst → writer 优先级检查 inbox，先到先得。所有 inbox 为空时，若 `final_summary_ready` 为 True 则结束图，否则回到 supervisor 继续调度。
+
+**对外接口**：
+
+| 函数 | 作用 |
+|------|------|
+| `build_multi_agent_graph(plan_act_graph, tools)` | 构建并编译多 Agent 协作图 |
+| `route_to_agents(state)` | 条件路由函数（dispatch → Agent / supervisor / END） |
+
+---
+
 ## 5. 架构图
 
-下图展示了系统的五层架构与各模块之间的数据依赖关系：
+下图展示了系统的六层架构与各模块之间的数据依赖关系：
 
 ```mermaid
 graph TB
-    subgraph UI["用户界面层"]
+    subgraph UI["用户界面层 (src/ui/)"]
         CLI["cli.py<br/>命令行交互"]
         WEB["streamlit_app.py + pages/<br/>Streamlit WebUI"]
         CHAT["pages/chat.py<br/>聊天页 + 执行计划卡片"]
     end
 
-    subgraph AGENT["智能体调度层"]
+    subgraph MULTI["多智能体协作层 (src/multi_agent/)"]
+        MULTI_GRAPH["multi_agent_graph.py<br/>Supervisor 协作图"]
+        SUPERVISOR["supervisor.py<br/>任务分解 + 依赖调度"]
+        MSG_BUS["message_bus.py<br/>消息总线 (publish→router→dispatch)"]
+        RESEARCHER["researcher<br/>文献检索 Agent<br/>（模拟 / Plan-Act 适配）"]
+        ANALYST["analyst<br/>文献分析 Agent<br/>（模拟 / Plan-Act 适配）"]
+        WRITER["writer<br/>报告撰写 Agent"]
+        ADAPTERS["agent_adapters.py<br/>Plan-Act 子图适配"]
+        M_STATE["multi_agent_state.py<br/>MessageBus / SharedScratchpad"]
+    end
+
+    subgraph AGENT["单Agent核心层 (src/core/)"]
         AGENT_CORE["agent.py<br/>Plan-Act 外层 StateGraph"]
         MEM_MGR["manage_memory<br/>滚动摘要 + 窗口记忆"]
         CLASSIFY["classify_complexity<br/>复杂度判断"]
@@ -717,13 +1026,10 @@ graph TB
         CHECKPOINTER["SqliteSaver<br/>checkpoints.db"]
     end
 
-    subgraph TOOLS["工具层"]
+    subgraph TOOLS["工具与服务层 (src/tools/)"]
         RETRIEVE_DOC["retrieve_documents<br/>Parent-Child 混合检索 + Rerank"]
         USER_INFO["save/get_user_info<br/>长期记忆读写"]
         WEB_SEARCH["web_search<br/>联网搜索"]
-    end
-
-    subgraph SERVICE["服务层"]
         RETRIEVER["retriever.py<br/>检索策略封装"]
         RERANKER["reranker.py<br/>DashScope Rerank 精排"]
         HYBRID["HybridRetriever<br/>语义+BM25+RRF 混合检索"]
@@ -742,6 +1048,26 @@ graph TB
     CLI --> AGENT_CORE
     WEB --> CHAT
     CHAT --> AGENT_CORE
+    CHAT --> MULTI_GRAPH
+
+    MULTI_GRAPH --> SUPERVISOR
+    MULTI_GRAPH --> MSG_BUS
+    MULTI_GRAPH --> RESEARCHER
+    MULTI_GRAPH --> ANALYST
+    MULTI_GRAPH --> WRITER
+    MULTI_GRAPH --> M_STATE
+    SUPERVISOR --> MSG_BUS
+    MSG_BUS --> RESEARCHER
+    MSG_BUS --> ANALYST
+    MSG_BUS --> WRITER
+    RESEARCHER --> MSG_BUS
+    ANALYST --> MSG_BUS
+    WRITER --> MSG_BUS
+
+    ADAPTERS --> AGENT_CORE
+    RESEARCHER -.-> ADAPTERS
+    ANALYST -.-> ADAPTERS
+
     AGENT_CORE --> MEM_MGR
     MEM_MGR --> ERROR_H
     ERROR_H --> GEN_CLAR
@@ -784,15 +1110,21 @@ graph TB
 
 **数据流说明**：
 
-1. **用户提问**（UI 层）→ `chat.py` 接收消息，通过 `stream_mode=["messages", "updates"]` 同时获取流式回复和节点状态更新。
-2. **记忆管理**（智能体调度层）→ `manage_memory` 检查对话长度，当轮数达到阈值时调用 LLM 生成或更新滚动摘要，`summary_covered_rounds` 精确记录摘要覆盖范围。同时清除上一次的 `pending_clarification`，确保新请求不受旧澄清状态干扰。
-3. **容错检查**（智能体调度层）→ `error_handler` 在复杂度判断之前对用户输入进行质量检查：术语归一化（`TERM_MAP` 替换）、纠正意图检测（`NEGATIVE_SIGNALS` 匹配）、启发式+LLM 双层置信度评估、槽位补全与意图消歧。若触发容错（输入模糊、纠正意图、槽位缺失），由 `generate_clarification` 生成追问消息（`AIMessage`）直接返回给用户，跳过复杂度判断和工具执行；若通过，再进入 `classify_complexity`。
-4. **复杂度判断**（智能体调度层）→ `classify_complexity` 注入完整对话历史（含滚动摘要+窗口原始消息）判断任务简单或复杂。简单任务走 `react_agent` 子图，复杂任务进入 Plan-Act 流程。
-5. **计划生成与执行** → `generate_plan` 输出多步计划，`execute_step` 逐条调用工具，`check_progress` 检查执行结果。若偏离预期则自动重规划（最多 3 次），全部完成后由 `summarize_results` 汇总生成最终回答。
-6. **执行计划可视化** → `chat.py` 根据 `updates` 模式实时捕获节点状态，在侧边栏渲染执行计划卡片：已完成标绿、失败标红、当前步骤蓝色闪烁。若 `error_handler` 触发追问，计划卡片被清空，避免与追问消息同时展示。
-7. **工具调用**（工具层）→ Agent 按需调用检索、记忆或搜索工具，获取外部信息。
-8. **检索与存储**（服务层 + 数据持久层）→ Parent-Child 混合检索 pipeline：Chroma 子块语义粗筛召回 Top-20 → ParentDocumentRetriever 返回完整父块 → BM25 在父块候选集上做关键词精排 → RRF 融合双通道结果 → DashScope Rerank 最终精排返回 Top-5。父文档由 JsonDocstore 持久化到 `./data/chroma/docstore.json`。记忆读写操作对应 SQLite/JSON 文件。
-9. **状态持久化** → 整个对话状态（包括 Plan、StepResult、conversation_summary、summary_covered_rounds、pending_clarification、error_log、last_slots、confidence 等字段）由 SqliteSaver 写入 SQLite，实现跨会话恢复。
+1. **用户提问**（UI 层）→ `pages/chat.py` 接收消息。单 Agent 模式直接调用 `agent.py` 的 Plan-Act 图；多 Agent 模式调用 `multi_agent_graph.py` 的协作图。
+2. **单 Agent 流程**（`src/core/`）：
+   - `manage_memory` 检查对话长度，超阈值时生成/更新滚动摘要，同时清除上一次的 `pending_clarification`。
+   - `error_handler` 对用户输入进行质量检查：术语归一化、纠正意图检测、启发式+LLM 双层置信度评估、槽位补全与意图消歧。若触发容错，由 `generate_clarification` 生成追问直接返回；若通过，进入 `classify_complexity`。
+   - `classify_complexity` 判断任务简单或复杂。简单任务走 `react_agent` 子图；复杂任务进入 `generate_plan → execute_step ↔ check_progress → summarize_results` 流程。偏离预期时自动重规划（最多 3 次）。
+3. **多 Agent 协作流程**（`src/multi_agent/`）：
+   - `supervisor_node` 提取用户消息，调用 `decompose_task` 分解为 AgentTask 列表（论文评审场景拆为 4 个子任务：提取论点 / 查证事实 / 批判逻辑 / 撰写报告），为无依赖的任务生成 TASK 消息。
+   - TASK 消息进入消息总线流水线：`publish_node` 发布到 MessageBus pending 队列 → `router_node` 按 `required_capability` 匹配 `agent_registry`（取负载最小的在线 agent）→ `dispatch_node` 将消息副本投递到目标 Agent 的 inbox。
+   - Agent 节点（researcher/analyst）从 inbox 取消息，经 `generic_agent_step` 模板执行任务。若传入了 Plan-Act 子图，通过 `agent_adapters.py` 调用真实推理（独立 thread_id 隔离）；否则使用模拟节点快速验证。结果写入 `SharedScratchpad`（乐观锁），RESULT 消息经消息总线回传 supervisor。
+   - `writer_node` 从 scratchpad 汇总所有结构化结论，生成 Markdown 格式评审报告，以 `AIMessage` 写入 messages（用户可见）。
+   - Supervisor 收到 RESULT 后更新任务状态，解锁依赖满足的新任务，循环直到所有任务完成（`final_summary_ready=True`）。
+4. **执行计划可视化** → `pages/chat.py` 根据 `updates` 模式实时捕获节点状态，在侧边栏渲染执行计划卡片（已完成✅/失败❌/执行中⏳）。多 Agent 模式下通过 `agent_progress` 展示各 Agent 的实时状态。
+5. **工具调用**（`src/tools/`）→ Agent 按需调用检索（`retrieve_documents`）、记忆（`save_user_info`/`get_user_info`）或搜索（`web_search`）工具获取外部信息。
+6. **检索与存储**（数据持久层）→ Parent-Child 混合检索 pipeline：Chroma 子块语义粗筛 Top-20 → ParentDocumentRetriever 返回完整父块 → BM25 关键词精排 → RRF 融合 → DashScope Rerank 精排 Top-5。父文档由 JsonDocstore 持久化。记忆读写对应 SQLite/JSON 文件。
+7. **状态持久化** → 单 Agent 状态（Plan、StepResult、conversation_summary、pending_clarification 等）由 SqliteSaver 写入 `./data/checkpoints.db`。多 Agent 状态（MessageBus、AgentTask、SharedScratchpad）由 MemorySaver 管理（可替换为 SqliteSaver 实现持久化）。
 
 ---
 

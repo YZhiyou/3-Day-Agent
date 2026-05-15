@@ -15,3 +15,5 @@ documents/
 
 # Environment variables
 .env
+.gitignore
+任务.md
